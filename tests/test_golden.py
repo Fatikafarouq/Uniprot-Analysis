@@ -442,3 +442,116 @@ def test_global_discovery_exposes_gene_level_inspection_when_possible():
     assert item["inspect"]["mode"] == "gene"
     assert item["inspect"]["gene"] == "TP53"
     assert item["inspect"]["taxon_id"] == 9606
+
+# 33 — a direct identity result should not wait for global/virus discovery.
+def test_direct_lookup_skips_unneeded_discovery_requests():
+    from app.core.service import ProteinService
+
+    tp53 = base_record("P04637", gene="TP53", name="Cellular tumor antigen p53")
+
+    class Client:
+        def __init__(self):
+            self.search_calls = []
+            self.stream_calls = []
+
+        def concurrent_uniprot_search(self, queries, size=100):
+            queries = list(queries)
+            self.search_calls.extend(queries)
+            return {q: ([tp53] if "organism_id:9606" in q else []) for q in queries}, []
+
+        def uniprot_stream(self, query):
+            self.stream_calls.append(query)
+            return [tp53]
+
+    client = Client()
+    result = ProteinService(client).lookup(
+        "TP53 in human",
+        taxon_id=9606,
+        organism_name="Human",
+        organism_phrase="human",
+        resolve_organism=False,
+    )
+    assert result["status"] == "ready"
+    assert len(client.search_calls) == 1
+    assert "organism_id:9606" in client.search_calls[0]
+    assert not any("virus_host_id" in query for query in client.search_calls)
+    assert not any(query == "(tp53)" for query in client.search_calls)
+    assert len(client.stream_calls) == 1
+
+
+# 34 — when direct identity fails, source rows are reused instead of searched twice.
+def test_discovery_reuses_mentioned_organism_search_rows():
+    from app.core.service import ProteinService
+
+    receptor = base_record("P58335", gene="ANTXR2", name="Receptor protein")
+    receptor["comments"] = [{"commentType": "FUNCTION", "texts": [{"value": "Receptor involved in anthrax toxin uptake"}]}]
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def concurrent_uniprot_search(self, queries, size=100):
+            queries = list(queries)
+            self.calls.append(queries)
+            out = {}
+            for q in queries:
+                if "organism_id:9606" in q and "virus_host_id" not in q:
+                    out[q] = [receptor]
+                else:
+                    out[q] = []
+            return out, []
+
+    client = Client()
+    result = ProteinService(client).lookup(
+        "anthrax in humans",
+        taxon_id=9606,
+        organism_name="Human",
+        organism_phrase="humans",
+        resolve_organism=False,
+    )
+    assert result["status"] == "no_direct_match"
+    flattened = [q for batch in client.calls for q in batch]
+    source_queries = [q for q in flattened if "organism_id:9606" in q and "virus_host_id" not in q]
+    assert len(source_queries) == 1
+
+
+# 35 — UniProt explanations render without blocking on Ensembl/APPRIS by default.
+def test_explain_records_defers_external_annotation_requests():
+    from app.core.explain import explain_records
+
+    class NoExternalClient:
+        def gene_centric(self, *args, **kwargs):
+            raise AssertionError("gene-centric should be lazy")
+        def ensembl_lookup(self, *args, **kwargs):
+            raise AssertionError("Ensembl should be lazy")
+        def appris(self, *args, **kwargs):
+            raise AssertionError("APPRIS should be lazy")
+
+    payload = explain_records([base_record("P1")], "ABC1", "Human", NoExternalClient())
+    assert payload["record_count"] == 1
+    assert payload["external_annotations_loaded"] is False
+
+
+# 36 — ready gene results expose enough metadata for bulk/selected downloads.
+def test_explain_gene_exposes_download_scope_and_accessions():
+    from app.core.service import ProteinService
+
+    one = base_record("P1", gene="ABC1")
+    two = base_record("P2", gene="ABC1", entry_type="UniProtKB unreviewed (TrEMBL)")
+
+    class Client:
+        def uniprot_stream(self, query):
+            return [one, two]
+
+    result = ProteinService(Client()).explain_gene("ABC1", 9606, species_name="Human")
+    assert result["download_scope"] == {"mode": "gene", "gene": "ABC1", "taxon_id": 9606}
+    assert result["accessions"] == ["P1", "P2"]
+    assert result["reviewed_count"] == 1
+    assert result["unreviewed_count"] == 1
+
+
+# 37 — the web download surface includes the practical UniProt formats.
+def test_download_formats_cover_fasta_tsv_json_xml_and_text():
+    from app.main import DOWNLOAD_FORMATS
+
+    assert {"fasta", "tsv", "json", "xml", "txt"}.issubset(DOWNLOAD_FORMATS)

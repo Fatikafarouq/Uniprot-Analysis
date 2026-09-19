@@ -1,46 +1,65 @@
-# UniProt Beginner Explainer — v17 Colab-parity web build
+# UniProt Explorer — v18 smooth web MVP
 
-This build treats the final Colab prototype (`uniprot_single_cell_v16_explained_discovery`) as the source of truth for search/discovery behavior, then layers the web/product improvements on top.
+This build keeps the final Colab search/evidence rules as the scientific source of truth and improves the web product around them.
 
-## Core behavior preserved from Colab
+## What the user can do
 
-- A single query can contain a protein/gene, organism, disease, phenotype, pathway, or conversational wording.
-- Organism resolution is conservative. A taxonomy hit validates a candidate; it does not silently invent organism intent.
-- The confirmed organism phrase is removed while preserving the biological concept.
-- Strict concept wording is searched first. Broader right-hand wording is used only after the strict concept fails and is explicitly labelled as related discovery.
-- Direct identity matches come only from UniProt protein/gene name fields. Disease/function/pathway/literature evidence cannot silently become identity evidence.
-- In a resolved organism, direct protein-name matches are grouped by gene. Selecting a gene fetches **all UniProtKB records for that gene + organism**.
-- Discovery keeps the three Colab paths: proteins from the mentioned organism, viral proteins linked by the host field, and global UniProt connections.
-- A discovery result remains selectable. If it has a gene + source taxon, selection opens **all UniProt records for that gene in that source organism**; otherwise it opens the individual accession.
-- Every discovery result explains exactly why it appeared; the tool does not invent a biological connection from unrelated metadata.
+- Search once in plain language: `TP53 in human`, `anthrax in humans`, `Li-Fraumeni syndrome`, etc.
+- See direct protein/gene identity matches separately from evidence-backed discovery.
+- Open the complete UniProt record set for a gene in its source organism.
+- See reviewed (Swiss-Prot) vs unreviewed (TrEMBL), isoforms, evidence, domains and links.
+- Filter a large record set by review status or text.
+- Select records and download the selection.
+- Download a whole gene record set or one entry as FASTA, TSV, JSON, XML or UniProt flat text.
+- Open UniProt, AlphaFold DB and PDB links.
+- Load Ensembl/APPRIS/gene-centric context only when wanted.
 
-## Product/engineering improvements layered on top
+## Why v18 is faster than v17
 
-- Core library + FastAPI API + frontend; no `input()` or `print()` in request logic.
-- `requests-cache` with a seven-day TTL locally; Vercel uses an in-memory cache because the deployed filesystem is read-only. The cache survives warm instances but is not a guaranteed cross-instance persistent cache.
-- Concurrent independent taxonomy/search requests.
-- Full gene record sets use UniProtKB `/stream` rather than serial accession fetches.
-- No runtime NLTK install/download. Organism resolution uses UniProt Taxonomy names/synonyms; spelling recovery is UniProt-grounded.
-- Source failures are logged and exposed to the user as warnings.
-- Reviewed (Swiss-Prot) vs unreviewed (TrEMBL) counts and labels.
-- Plain-English isoform explanation and exposed UniProt alternative products.
-- ECO evidence on FUNCTION annotations is surfaced conservatively.
-- Generic common-domain comparison; no VWFA-specific branch.
-- UniProt, AlphaFold DB, and PDB links on record cards.
-- Golden tests protect no-invention rules and Colab/web parity.
+The previous web adapter repeated work that the Colab notebook did not need to repeat in an interactive website. v18 keeps the search semantics but changes request timing:
 
-## API
+1. A mentioned-organism UniProt search is performed once and reused for both direct-name matching and source-organism discovery.
+2. If a direct identity match is found, the app immediately retrieves that gene's record set and does not wait for unrelated global/virus discovery.
+3. If discovery is needed, virus-host and global branches run concurrently.
+4. Ensembl, APPRIS and UniProt gene-centric calls are lazy and do not block the first result page.
+5. Expensive spelling recovery is available on demand instead of delaying every zero-result search.
+6. Repeated browser requests in the same session are cached client-side; HTTP responses are also cached server-side while the Vercel instance is warm.
+7. Network retries are bounded so one slow upstream branch cannot hold the page for minutes.
 
-- `POST /api/lookup` — single front door; organism resolution, direct identity, or evidence-backed discovery.
-- `POST /api/explain` — fetch and explain all UniProt records for a gene + taxon.
-- `POST /api/entry` — inspect one accession when no gene-level expansion is possible.
-- `POST /api/discover` — explicit discovery-only mode.
-- `GET /api/health` — health/version check.
+## Project layout
+
+```text
+app/
+  core/
+    evidence.py
+    explain.py
+    http.py
+    query.py
+    records.py
+    search.py
+    service.py
+    taxonomy.py
+    text.py
+  static/
+    index.html
+    app.js
+    styles.css
+  main.py
+tests/
+  test_golden.py
+requirements.txt
+```
 
 ## Tests
 
+Run:
+
 ```bash
-pytest -q
+PYTHONPATH=. pytest -q
 ```
 
-The current suite contains 32 golden/parity tests.
+Current suite: 37 tests.
+
+## Deployment
+
+The repository can be deployed directly to Vercel as a FastAPI project. `app/main.py` is the FastAPI entry point and also serves the static frontend.

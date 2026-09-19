@@ -298,8 +298,32 @@ def build_explanations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return explained
 
 
-def explain_records(records: list[dict[str, Any]], gene: str, species: str, client: DataClient) -> dict[str, Any]:
-    external, warnings = get_external_annotation_context(records, client)
+def explain_records(
+    records: list[dict[str, Any]],
+    gene: str,
+    species: str,
+    client: DataClient,
+    *,
+    include_external: bool = False,
+) -> dict[str, Any]:
+    """Build the UniProt comparison without blocking on secondary databases.
+
+    The Colab version queried Ensembl, APPRIS and UniProt gene-centric data as
+    part of every explanation. On a serverless web request those secondary
+    services can dominate latency. The core result now renders immediately
+    from UniProt; secondary annotations can be requested separately.
+    """
+    warnings: list[dict[str, str]] = []
+    external = {
+        "ensembl_gene": None,
+        "ensembl_canonical": None,
+        "ensembl_species": None,
+        "gene_centric_accession": None,
+        "appris": {},
+    }
+    if include_external:
+        external, warnings = get_external_annotation_context(records, client)
+
     comparison = build_comparison_records(records, external)
     explained = build_explanations(comparison)
 
@@ -319,6 +343,8 @@ def explain_records(records: list[dict[str, Any]], gene: str, species: str, clie
         "gene": gene,
         "species": species,
         "record_count": total,
+        "reviewed_count": reviewed,
+        "unreviewed_count": unreviewed,
         "review_summary": review_summary,
         "review_explanation": (
             "Reviewed (Swiss-Prot) entries are manually reviewed and annotated by UniProt curators. "
@@ -328,4 +354,10 @@ def explain_records(records: list[dict[str, Any]], gene: str, species: str, clie
         "records": explained,
         "warnings": warnings,
         "external_annotations": external,
+        "external_annotations_loaded": include_external,
     }
+
+
+def load_external_annotations(records: list[dict[str, Any]], client: DataClient) -> dict[str, Any]:
+    external, warnings = get_external_annotation_context(records, client)
+    return {"external_annotations": external, "warnings": warnings}

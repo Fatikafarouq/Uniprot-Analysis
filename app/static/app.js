@@ -3,78 +3,163 @@ const statusBox = $("status");
 const choices = $("choices");
 const results = $("results");
 
+const responseCache = new Map();
+let activeController = null;
+let currentReady = null;
+let currentFilter = "all";
+let currentRecordSearch = "";
+let visibleLimit = 12;
+let selectedAccessions = new Set();
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
 }
 
-function showStatus(message, warning=false) {
+function showStatus(message, warning=false, loading=false) {
   statusBox.hidden = !message;
   statusBox.className = `status ${warning ? 'warning' : ''}`;
-  statusBox.textContent = message || "";
+  statusBox.innerHTML = message ? `${loading ? '<div class="loading"><span class="spinner"></span><span>' : ''}${escapeHtml(message)}${loading ? '</span></div>' : ''}` : "";
 }
 
 function renderWarnings(warnings=[]) {
   if (!warnings.length) return "";
-  return `<div class="status warning"><strong>Source note:</strong><ul>${warnings.map(w => `<li>${escapeHtml(w.message)}</li>`).join('')}</ul></div>`;
+  return `<div class="status warning"><strong>Source note</strong><ul>${warnings.map(w => `<li>${escapeHtml(w.message)}</li>`).join('')}</ul></div>`;
 }
 
-async function post(url, body) {
-  const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+async function post(url, body, signal=null) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+    signal,
+  });
   let payload = null;
   try { payload = await response.json(); } catch (_) {}
-  if (!response.ok) throw new Error(payload?.message || `Request failed (${response.status})`);
+  if (!response.ok) throw new Error(payload?.detail || payload?.message || `Request failed (${response.status})`);
   return payload;
 }
 
-function resetMain() {
-  choices.hidden = true; choices.innerHTML = "";
-  results.hidden = true; results.innerHTML = "";
+function lookupCacheKey(body) {
+  return JSON.stringify(['lookup', body]);
 }
 
-async function runLookup(query, extra={}) {
-  resetMain();
-  showStatus("Checking UniProt…");
+async function cachedPost(url, body, {signal=null, cache=true}={}) {
+  const key = JSON.stringify([url, body]);
+  if (cache && responseCache.has(key)) return responseCache.get(key);
+  const payload = await post(url, body, signal);
+  if (cache) responseCache.set(key, payload);
+  return payload;
+}
+
+function geneDownloadUrl(gene, taxonId, format) {
+  return `/api/download/gene?gene=${encodeURIComponent(gene)}&taxon_id=${encodeURIComponent(taxonId)}&format=${encodeURIComponent(format)}`;
+}
+
+function entryDownloadUrl(accession, format) {
+  return `/api/download/entry/${encodeURIComponent(accession)}?format=${encodeURIComponent(format)}`;
+}
+
+function formatDownloadLinks(urlBuilder, label='Download') {
+  return `<div class="download-group"><span class="download-label">${escapeHtml(label)}:</span>${['fasta','tsv','json','xml','txt'].map(fmt => `<a class="download-link" href="${urlBuilder(fmt)}">${fmt === 'txt' ? 'UniProt TXT' : fmt.toUpperCase()}</a>`).join('')}</div>`;
+}
+
+async function downloadSelected(format) {
+  const ids = [...selectedAccessions];
+  if (!ids.length) {
+    showStatus('Select at least one record first.', true);
+    return;
+  }
+  showStatus(`Preparing ${ids.length} selected record${ids.length === 1 ? '' : 's'} as ${format.toUpperCase()}…`, false, true);
   try {
-    const data = await post('/api/lookup', {query, ...extra});
-    showStatus("");
-    renderLookup(data, query);
+    const response = await fetch('/api/download/selected', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({accessions: ids, format}),
+    });
+    if (!response.ok) {
+      let msg = `Download failed (${response.status})`;
+      try { msg = (await response.json()).detail || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `uniprot_selected_${ids.length}.${format}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showStatus('');
   } catch (err) {
     showStatus(err.message, true);
   }
 }
 
-function renderLookup(data, originalQuery) {
-  if (data.status === 'ready') return renderReady(data);
+async function runLookup(query, overrides={}) {
+  if (activeController) activeController.abort();
+  activeController = new AbortController();
+  choices.hidden = true;
+  results.hidden = true;
+  currentReady = null;
+  selectedAccessions.clear();
+  const body = {query, ...overrides};
+  const started = performance.now();
+  showStatus('Searching UniProt…', false, true);
+  const slowTimer = setTimeout(() => {
+    showStatus('UniProt is taking longer than usual, but the search is still running…', false, true);
+  }, 12000);
 
-  if (data.status === 'needs_organism_choice') {
-    choices.hidden = false;
-    choices.innerHTML = `<h2>Which organism did you mean?</h2>${renderWarnings(data.warnings)}` +
-      data.options.map(opt => `<div class="choice"><div><strong>${escapeHtml(opt.label)}</strong><div class="small">${escapeHtml(opt.rank)} · UniProt taxonomy ${escapeHtml(opt.taxon_id)}</div></div><button data-taxon="${opt.taxon_id}" data-name="${escapeHtml(opt.label)}" data-phrase="${escapeHtml(opt.input_phrase || '')}">Use this organism</button></div>`).join('') +
-      `<div class="choice"><div><strong>None of these</strong><div class="small">Continue without choosing an organism.</div></div><button data-broad="1">Continue broadly</button></div>`;
-    choices.querySelectorAll('[data-taxon]').forEach(btn => btn.addEventListener('click', () => runLookup(originalQuery, {taxon_id:Number(btn.dataset.taxon), organism_name:btn.dataset.name, organism_phrase:btn.dataset.phrase, resolve_organism:false})));
-    choices.querySelector('[data-broad]').addEventListener('click', () => runLookup(originalQuery, {resolve_organism:false}));
+  try {
+    const data = await cachedPost('/api/lookup', body, {signal: activeController.signal});
+    clearTimeout(slowTimer);
+    const elapsed = Math.max(0.1, (performance.now() - started) / 1000).toFixed(1);
+    showStatus(`Search completed in ${elapsed}s.`);
+    setTimeout(() => { if (!statusBox.classList.contains('warning')) showStatus(''); }, 2200);
+    handleLookupResponse(data, query);
+  } catch (err) {
+    clearTimeout(slowTimer);
+    if (err.name === 'AbortError') return;
+    showStatus(err.message, true);
+  }
+}
+
+function handleLookupResponse(data, originalQuery) {
+  if (data.status === 'ready') {
+    renderReady(data);
     return;
   }
 
-  if (data.status === 'needs_spelling_confirmation') {
-    const suggestion = data.suggestion?.phrase || '';
+  if (data.status === 'needs_organism_choice') {
     choices.hidden = false;
-    choices.innerHTML = `<h2>Possible spelling correction</h2><p>${escapeHtml(data.message)}</p><p class="small">The suggestion comes from wording found in UniProt records for the resolved organism. It will not be used unless you confirm it.</p>${renderWarnings(data.warnings)}<div class="choice"><div><strong>${escapeHtml(suggestion)}</strong></div><div><button id="accept-spelling">Use this spelling</button> <button id="reject-spelling" class="secondary">Keep my wording</button></div></div>`;
-    $('accept-spelling').addEventListener('click', () => runLookup(originalQuery, {confirmed_spelling:suggestion}));
-    $('reject-spelling').addEventListener('click', () => runLookup(originalQuery, {confirmed_spelling:''}));
+    choices.innerHTML = `<div class="summary"><h2>Which organism did you mean?</h2><p>${escapeHtml(data.message)}</p></div>${renderWarnings(data.warnings)}` +
+      data.options.map(opt => `<div class="choice"><div><strong>${escapeHtml(opt.label)}</strong><div class="small">${escapeHtml(opt.rank || '')} · Taxonomy ID ${escapeHtml(opt.taxon_id)}</div></div><button data-organism-taxon="${escapeHtml(opt.taxon_id)}" data-organism-name="${escapeHtml(opt.label)}" data-organism-phrase="${escapeHtml(opt.input_phrase)}">Use this organism</button></div>`).join('') +
+      `<div class="choice"><div><strong>Continue without choosing an organism</strong><div class="small">The search will stay broad and label the source organism for each result.</div></div><button class="secondary" data-no-organism>Continue broadly</button></div>`;
+
+    choices.querySelectorAll('[data-organism-taxon]').forEach(btn => btn.addEventListener('click', () => {
+      runLookup(originalQuery, {
+        taxon_id: Number(btn.dataset.organismTaxon),
+        organism_name: btn.dataset.organismName,
+        organism_phrase: btn.dataset.organismPhrase,
+        resolve_organism: false,
+      });
+    }));
+    choices.querySelector('[data-no-organism]')?.addEventListener('click', () => runLookup(originalQuery, {resolve_organism:false}));
     return;
   }
 
   if (data.status === 'needs_protein_choice') {
     choices.hidden = false;
-    choices.innerHTML = `<h2>Which protein did you mean?</h2><p>${escapeHtml(data.message)}</p>${renderWarnings(data.warnings)}` +
-      data.options.map(opt => `<div class="choice"><div><strong>${escapeHtml(opt.gene)}</strong><div>${escapeHtml(opt.organism)}${opt.scientific_name && opt.scientific_name !== opt.organism ? ` · <i>${escapeHtml(opt.scientific_name)}</i>` : ''}</div>${(opt.reasons || []).map(reason => `<div class="small">${escapeHtml(reason)}</div>`).join('')}<div class="small">${escapeHtml(opt.record_count_in_search)} UniProt search record(s) carried the direct name evidence.</div></div><button data-gene="${escapeHtml(opt.gene)}" data-taxon="${opt.taxon_id}" data-species="${escapeHtml(opt.organism)}">Explain all records</button></div>`).join('');
+    choices.innerHTML = `<div class="summary"><h2>More than one direct protein/gene match</h2><p>${escapeHtml(data.message)}</p></div>${renderWarnings(data.warnings)}` +
+      data.options.map(opt => {
+        const dl = opt.gene && opt.taxon_id ? formatDownloadLinks(fmt => geneDownloadUrl(opt.gene, opt.taxon_id, fmt), 'Download all records') : '';
+        return `<div class="choice"><div><strong>${escapeHtml(opt.gene)}</strong><div>${escapeHtml(opt.organism)}${opt.scientific_name && opt.scientific_name !== opt.organism ? ` · <i>${escapeHtml(opt.scientific_name)}</i>` : ''}</div>${(opt.reasons || []).map(reason => `<div class="small">${escapeHtml(reason)}</div>`).join('')}<div class="small">${escapeHtml(opt.record_count_in_search)} search record(s) carried direct-name evidence.</div><div class="links">${dl}</div></div><div class="choice-actions"><button data-gene="${escapeHtml(opt.gene)}" data-taxon="${escapeHtml(opt.taxon_id)}" data-species="${escapeHtml(opt.organism)}">Open record set</button></div></div>`;
+      }).join('');
     choices.querySelectorAll('[data-gene]').forEach(btn => btn.addEventListener('click', async () => {
-      showStatus('Fetching the full UniProt record set…');
-      try {
-        const payload = await post('/api/explain', {gene:btn.dataset.gene, taxon_id:Number(btn.dataset.taxon), species_name:btn.dataset.species});
-        showStatus(''); renderReady(payload);
-      } catch (err) { showStatus(err.message, true); }
+      await openGeneSet(btn.dataset.gene, Number(btn.dataset.taxon), btn.dataset.species);
     }));
     return;
   }
@@ -82,64 +167,244 @@ function renderLookup(data, originalQuery) {
   if (data.status === 'no_direct_match') {
     results.hidden = false;
     const organismNote = data.organism?.name
-      ? `<p class="small"><strong>Organism resolved:</strong> ${escapeHtml(data.organism.input_phrase || data.organism.name)} → ${escapeHtml(data.organism.name)}. Discovery is not restricted to that organism; other UniProt source organisms can appear when the evidence is traceable.</p>`
+      ? `<p class="small"><strong>Organism resolved:</strong> ${escapeHtml(data.organism.input_phrase || data.organism.name)} → ${escapeHtml(data.organism.name)}. Other source organisms can still appear when the evidence is traceable.</p>`
       : '';
     const relatedNote = data.search_mode === 'related' && data.related_from
       ? `<p class="small"><strong>Related search:</strong> These results use “${escapeHtml(data.query)}” because the full concept “${escapeHtml(data.related_from)}” produced no explainable result.</p>`
       : '';
-    results.innerHTML = `<div class="summary"><h2>No direct identity match</h2><p>${escapeHtml(data.message)}</p>${organismNote}${relatedNote}<p>The cards below are discovery options. Each one shows the exact evidence that caused it to appear.</p></div>${renderWarnings(data.warnings)}${renderDiscoveryCards(data.discovery || [])}`;
+    const spelling = data.can_check_spelling && data.organism?.taxon_id
+      ? `<button class="secondary" id="check-spelling" data-phrase="${escapeHtml(data.query)}" data-taxon="${escapeHtml(data.organism.taxon_id)}">Check spelling suggestions</button>`
+      : '';
+    results.innerHTML = `<div class="summary"><h2>${(data.discovery || []).length ? 'Traceable UniProt connections' : 'No traceable UniProt match'}</h2><p>${escapeHtml(data.message)}</p>${organismNote}${relatedNote}${spelling ? `<div class="links">${spelling}</div>` : ''}</div>${renderWarnings(data.warnings)}${renderDiscoveryCards(data.discovery || [])}`;
     bindDiscoveryButtons(results);
+    results.querySelector('#check-spelling')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = 'Checking…';
+      try {
+        const spellingData = await post('/api/spelling', {phrase:button.dataset.phrase, taxon_id:Number(button.dataset.taxon)});
+        if (spellingData.suggestion?.phrase) {
+          button.outerHTML = `<button id="use-spelling" class="secondary">Search “${escapeHtml(spellingData.suggestion.phrase)}”</button>`;
+          results.querySelector('#use-spelling')?.addEventListener('click', () => runLookup(originalQuery, {confirmed_spelling: spellingData.suggestion.phrase}));
+        } else {
+          button.textContent = 'No confident spelling suggestion found';
+        }
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = 'Check spelling suggestions';
+        showStatus(err.message, true);
+      }
+    });
     return;
   }
 
   showStatus(data.message || 'No result was returned.', data.status !== 'ready');
 }
 
+async function openGeneSet(gene, taxonId, speciesName) {
+  const body = {gene, taxon_id: taxonId, species_name: speciesName};
+  showStatus('Fetching the full UniProt record set…', false, true);
+  try {
+    const payload = await cachedPost('/api/explain', body);
+    showStatus('');
+    renderReady(payload);
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (err) {
+    showStatus(err.message, true);
+  }
+}
+
+async function openAccession(accession, speciesName) {
+  showStatus('Fetching the UniProt entry…', false, true);
+  try {
+    const payload = await cachedPost('/api/entry', {accession, species_name:speciesName});
+    showStatus('');
+    renderReady(payload);
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (err) {
+    showStatus(err.message, true);
+  }
+}
+
+function recordMatchesFilter(item) {
+  const review = item.record?.review?.status || 'unknown';
+  if (currentFilter !== 'all' && review !== currentFilter) return false;
+  if (!currentRecordSearch) return true;
+  const haystack = [item.accession, item.record?.name, item.record?.gene, item.record?.transcript].filter(Boolean).join(' ').toLowerCase();
+  return haystack.includes(currentRecordSearch.toLowerCase());
+}
+
+function recordCard(item) {
+  const r = item.record || {};
+  const review = r.review || {};
+  const evidence = r.function_evidence || {};
+  const links = r.links || {};
+  const isoforms = r.isoforms || [];
+  const accession = item.accession;
+  const pdbLinks = (links.pdb || []).map(x => `<a href="${x.url}" target="_blank" rel="noopener">PDB ${escapeHtml(x.id)}</a>`).join(' · ');
+  return `<article class="card" data-record-card data-review="${escapeHtml(review.status || 'unknown')}" data-accession="${escapeHtml(accession)}">
+    <div class="card-head"><div><span class="badge ${escapeHtml(review.status)}">${escapeHtml(review.label)}</span><h3>${escapeHtml(accession)}</h3></div><input class="card-select" type="checkbox" aria-label="Select ${escapeHtml(accession)}" data-select-accession="${escapeHtml(accession)}" ${selectedAccessions.has(accession) ? 'checked' : ''}></div>
+    <div class="meta">${escapeHtml(r.name)} · ${escapeHtml(item.length ?? 'unknown')} aa</div>
+    <ul>${(item.sentences || []).map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
+    <div class="evidence-box"><strong>Function evidence:</strong> ${escapeHtml(evidence.summary || 'Not available')}</div>
+    ${isoforms.length ? `<details><summary>Isoforms described in this entry (${isoforms.length})</summary><ul>${isoforms.map(i => `<li>${escapeHtml(i.ids?.join(', ') || i.name || 'Unnamed isoform')} — ${escapeHtml(i.sequence_status || 'status unavailable')}</li>`).join('')}</ul></details>` : ''}
+    <details><summary>Database details</summary><p><strong>Protein existence:</strong> ${escapeHtml(r.existence)}</p><p><strong>Ensembl transcript cross-reference:</strong> ${escapeHtml(r.transcript || 'Not returned by UniProt')}</p></details>
+    <div class="links">
+      ${links.uniprot ? `<a href="${links.uniprot}" target="_blank" rel="noopener">Open in UniProt</a>` : ''}
+      ${links.alphafold ? `<a href="${links.alphafold}" target="_blank" rel="noopener">AlphaFold DB</a>` : ''}
+      ${pdbLinks || (links.pdb_search ? `<a href="${links.pdb_search}" target="_blank" rel="noopener">Search PDB</a>` : '')}
+    </div>
+    <div class="links">${formatDownloadLinks(fmt => entryDownloadUrl(accession, fmt), 'Download this record')}</div>
+  </article>`;
+}
+
 function renderReady(data) {
-  results.hidden = false;
+  currentReady = data;
+  currentFilter = 'all';
+  currentRecordSearch = '';
+  visibleLimit = 12;
+  selectedAccessions.clear();
   choices.hidden = true;
-  const cards = (data.records || []).map(item => {
-    const r = item.record;
-    const review = r.review || {};
-    const evidence = r.function_evidence || {};
-    const links = r.links || {};
-    const isoforms = r.isoforms || [];
-    const pdbLinks = (links.pdb || []).map(x => `<a href="${x.url}" target="_blank" rel="noopener">PDB ${escapeHtml(x.id)}</a>`).join(' · ');
-    return `<article class="card">
-      <div><span class="badge ${escapeHtml(review.status)}">${escapeHtml(review.label)}</span></div>
-      <h3>${escapeHtml(item.accession)}</h3>
-      <div class="meta">${escapeHtml(r.name)} · ${escapeHtml(item.length ?? 'unknown')} aa</div>
-      <ul>${(item.sentences || []).map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
-      <div class="evidence-box"><strong>Function evidence:</strong> ${escapeHtml(evidence.summary || 'Not available')}</div>
-      ${isoforms.length ? `<details><summary>Isoforms described in this UniProt entry (${isoforms.length})</summary><ul>${isoforms.map(i => `<li>${escapeHtml(i.ids?.join(', ') || i.name || 'Unnamed isoform')} — ${escapeHtml(i.sequence_status || 'status unavailable')}</li>`).join('')}</ul></details>` : ''}
-      <details><summary>Database details</summary>
-        <p><strong>Protein existence:</strong> ${escapeHtml(r.existence)}</p>
-        <p><strong>Ensembl transcript:</strong> ${escapeHtml(r.transcript || 'No cross-reference returned by UniProt')}</p>
-        ${r.appris ? `<p><strong>APPRIS:</strong> ${escapeHtml(r.appris)}</p>` : ''}
-        ${r.canonical ? `<p><strong>Ensembl canonical:</strong> Yes</p>` : ''}
-        ${r.gene_centric ? `<p><strong>UniProt gene-centric representative:</strong> Yes</p>` : ''}
-      </details>
-      <div class="links">
-        ${links.uniprot ? `<a href="${links.uniprot}" target="_blank" rel="noopener">UniProt</a>` : ''}
-        ${links.alphafold ? `<a href="${links.alphafold}" target="_blank" rel="noopener">AlphaFold DB</a>` : ''}
-        ${pdbLinks || (links.pdb_search ? `<a href="${links.pdb_search}" target="_blank" rel="noopener">Search PDB</a>` : '')}
-      </div>
-    </article>`;
-  }).join('');
+  results.hidden = false;
 
-  const directReasons = (data.search_context?.direct_reasons || []);
+  const directReasons = data.search_context?.direct_reasons || [];
   const contextHtml = directReasons.length ? `<div class="evidence-box"><strong>Why this was treated as a direct identity match:</strong><ul>${directReasons.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
+  const allDownloads = data.download_scope?.mode === 'gene'
+    ? formatDownloadLinks(fmt => geneDownloadUrl(data.download_scope.gene, data.download_scope.taxon_id, fmt), 'Download full record set')
+    : formatDownloadLinks(fmt => entryDownloadUrl(data.accessions?.[0], fmt), 'Download record');
 
-  results.innerHTML = `${renderWarnings(data.warnings)}<section class="summary"><h2>UniProt has ${escapeHtml(data.record_count)} record${data.record_count === 1 ? '' : 's'} for ${escapeHtml(data.gene)} in ${escapeHtml(data.species)}.</h2>${contextHtml}<p>${escapeHtml(data.review_summary)}</p><p>${escapeHtml(data.review_explanation)}</p>${data.isoform_explanation ? `<p><strong>Isoforms:</strong> ${escapeHtml(data.isoform_explanation)}</p>` : ''}<p class="small">The cards below are comparisons, not rankings or recommendations.</p></section><div class="grid">${cards}</div>`;
+  results.innerHTML = `${renderWarnings(data.warnings)}
+    <section class="summary">
+      <h2>${escapeHtml(data.gene)} · ${escapeHtml(data.species)}</h2>
+      <p><strong>${escapeHtml(data.record_count)} UniProtKB record${data.record_count === 1 ? '' : 's'}.</strong> ${escapeHtml(data.review_summary)}</p>
+      ${contextHtml}
+      <p>${escapeHtml(data.review_explanation)}</p>
+      ${data.isoform_explanation ? `<p><strong>Isoforms:</strong> ${escapeHtml(data.isoform_explanation)}</p>` : ''}
+      <div class="links">${allDownloads}</div>
+      ${data.download_scope?.mode === 'gene' ? `<div class="links"><button class="secondary" id="load-external">Load Ensembl / APPRIS context</button></div><div id="external-panel" class="external-panel"></div>` : ''}
+    </section>
+    <section class="toolbar">
+      <div class="toolbar-row">
+        <button class="filter-button active" data-filter="all">All (${escapeHtml(data.record_count)})</button>
+        <button class="filter-button secondary" data-filter="reviewed">Reviewed (${escapeHtml(data.reviewed_count ?? 0)})</button>
+        <button class="filter-button secondary" data-filter="unreviewed">Unreviewed (${escapeHtml(data.unreviewed_count ?? 0)})</button>
+        <input id="record-search" placeholder="Filter by accession, protein name, gene or transcript" />
+      </div>
+      <div class="toolbar-row">
+        <button class="secondary" id="select-visible">Select visible</button>
+        <button class="secondary" id="clear-selection">Clear selection</button>
+        <span class="small" id="selection-count">0 selected</span>
+        <div class="download-group"><span class="download-label">Download selected:</span>${['fasta','tsv','json','xml','txt'].map(fmt => `<button class="secondary selected-download" data-format="${fmt}">${fmt === 'txt' ? 'TXT' : fmt.toUpperCase()}</button>`).join('')}</div>
+      </div>
+    </section>
+    <div id="record-grid" class="grid"></div>
+    <button id="show-more" class="secondary show-more" hidden>Show more records</button>
+    <div id="empty-records" class="summary empty" hidden>No records match this filter.</div>`;
+
+  bindReadyControls();
+  renderRecordGrid();
+}
+
+function bindReadyControls() {
+  results.querySelectorAll('[data-filter]').forEach(btn => btn.addEventListener('click', () => {
+    currentFilter = btn.dataset.filter;
+    visibleLimit = 12;
+    results.querySelectorAll('[data-filter]').forEach(x => x.classList.toggle('active', x === btn));
+    renderRecordGrid();
+  }));
+
+  results.querySelector('#record-search')?.addEventListener('input', (event) => {
+    currentRecordSearch = event.target.value.trim();
+    visibleLimit = 12;
+    renderRecordGrid();
+  });
+
+  results.querySelector('#show-more')?.addEventListener('click', () => {
+    visibleLimit += 24;
+    renderRecordGrid();
+  });
+
+  results.querySelector('#select-visible')?.addEventListener('click', () => {
+    getVisibleRecordItems().forEach(item => selectedAccessions.add(item.accession));
+    renderRecordGrid();
+  });
+
+  results.querySelector('#clear-selection')?.addEventListener('click', () => {
+    selectedAccessions.clear();
+    renderRecordGrid();
+  });
+
+  results.querySelectorAll('.selected-download').forEach(btn => btn.addEventListener('click', () => downloadSelected(btn.dataset.format)));
+
+  results.querySelector('#load-external')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = 'Loading…';
+    const panel = results.querySelector('#external-panel');
+    try {
+      const data = await cachedPost('/api/external-context', {gene:currentReady.gene, taxon_id:currentReady.taxon_id});
+      const e = data.external_annotations || {};
+      panel.innerHTML = `${renderWarnings(data.warnings)}<div class="evidence-box"><strong>Linked annotation context</strong><p>Ensembl gene: ${escapeHtml(e.ensembl_gene || 'Not available')}</p><p>Canonical transcript: ${escapeHtml(e.ensembl_canonical || 'Not available')}</p><p>UniProt gene-centric representative: ${escapeHtml(e.gene_centric_accession || 'Not available')}</p><p>APPRIS annotations loaded: ${escapeHtml(Object.keys(e.appris || {}).length)}</p></div>`;
+      button.remove();
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = 'Load Ensembl / APPRIS context';
+      panel.innerHTML = `<div class="status warning">${escapeHtml(err.message)}</div>`;
+    }
+  });
+}
+
+function getFilteredRecordItems() {
+  if (!currentReady) return [];
+  const items = (currentReady.records || []).filter(recordMatchesFilter);
+  return items.sort((a, b) => {
+    const rank = {reviewed:0, unreviewed:1, unknown:2};
+    const ar = rank[a.record?.review?.status] ?? 3;
+    const br = rank[b.record?.review?.status] ?? 3;
+    return ar - br || String(a.accession).localeCompare(String(b.accession));
+  });
+}
+
+function getVisibleRecordItems() {
+  return getFilteredRecordItems().slice(0, visibleLimit);
+}
+
+function updateSelectionCount() {
+  const node = results.querySelector('#selection-count');
+  if (node) node.textContent = `${selectedAccessions.size} selected`;
+}
+
+function renderRecordGrid() {
+  const grid = results.querySelector('#record-grid');
+  if (!grid) return;
+  const all = getFilteredRecordItems();
+  const visible = all.slice(0, visibleLimit);
+  grid.innerHTML = visible.map(recordCard).join('');
+  results.querySelector('#empty-records').hidden = all.length !== 0;
+  const more = results.querySelector('#show-more');
+  more.hidden = visible.length >= all.length;
+  if (!more.hidden) more.textContent = `Show more (${all.length - visible.length} remaining)`;
+
+  grid.querySelectorAll('[data-select-accession]').forEach(box => box.addEventListener('change', () => {
+    if (box.checked) selectedAccessions.add(box.dataset.selectAccession);
+    else selectedAccessions.delete(box.dataset.selectAccession);
+    updateSelectionCount();
+  }));
+  updateSelectionCount();
 }
 
 function discoveryCard(item) {
   const inspect = item.inspect || {};
-  const inspectAttrs = inspect.mode === 'gene' && inspect.gene && inspect.taxon_id
+  const isGene = inspect.mode === 'gene' && inspect.gene && inspect.taxon_id;
+  const inspectAttrs = isGene
     ? `data-inspect-gene="${escapeHtml(inspect.gene)}" data-inspect-taxon="${escapeHtml(inspect.taxon_id)}" data-inspect-species="${escapeHtml(inspect.species_name || item.organism || '')}"`
     : (inspect.accession ? `data-inspect-accession="${escapeHtml(inspect.accession)}" data-inspect-species="${escapeHtml(inspect.species_name || item.organism || '')}"` : '');
-  const buttonLabel = inspect.mode === 'gene' && inspect.gene ? `Explain all ${escapeHtml(inspect.gene)} records` : 'Inspect this UniProt entry';
-  const evidenceCount = item.evidence_record_count > 1 ? `<p class="small">${escapeHtml(item.evidence_record_count)} records for this gene carried qualifying evidence in the discovery search.</p>` : '';
+  const buttonLabel = isGene ? `Open all ${escapeHtml(inspect.gene)} records` : 'Open this UniProt entry';
+  const evidenceCount = item.evidence_record_count > 1 ? `<p class="small">${escapeHtml(item.evidence_record_count)} search records for this gene carried qualifying evidence.</p>` : '';
+  const dl = isGene
+    ? formatDownloadLinks(fmt => geneDownloadUrl(inspect.gene, inspect.taxon_id, fmt), 'Download record set')
+    : (inspect.accession ? formatDownloadLinks(fmt => entryDownloadUrl(inspect.accession, fmt), 'Download entry') : '');
+  const uniLink = item.accession ? `<a href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(item.accession)}/entry" target="_blank" rel="noopener">Open evidence entry in UniProt</a>` : '';
 
   return `<article class="card">
     <h3>${escapeHtml(item.protein_name || item.gene || item.accession)}</h3>
@@ -148,54 +413,34 @@ function discoveryCard(item) {
     ${item.connection_explanation ? `<p>${escapeHtml(item.connection_explanation)}</p>` : ''}
     ${item.function_note && item.evidence_type !== 'function' ? `<p><strong>What UniProt says it does:</strong> ${escapeHtml(item.function_note)}</p>` : ''}
     ${evidenceCount}
-    <strong>Evidence shown by UniProt</strong>
+    <strong>Why this appeared</strong>
     ${(item.why || []).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('')}
-    ${inspectAttrs ? `<div class="links"><button class="inspect-discovery" ${inspectAttrs}>${buttonLabel}</button></div>` : ''}
+    <div class="links">${inspectAttrs ? `<button class="inspect-discovery" ${inspectAttrs}>${buttonLabel}</button>` : ''}${uniLink}</div>
+    <div class="links">${dl}</div>
   </article>`;
 }
 
 function renderDiscoveryCards(items) {
-  if (!items.length) return `<div class="summary"><p>No traceable discovery result was found.</p></div>`;
-
+  if (!items.length) return `<div class="summary empty"><p>No traceable discovery result was found.</p></div>`;
   const groups = [
     ['mentioned_organism', 'Proteins from the organism you mentioned'],
     ['virus_host', 'Viral proteins linked to the mentioned host'],
     ['global', 'Other traceable UniProt connections'],
   ];
-
   const sections = groups.map(([key, label]) => {
     const rows = items.filter(item => (item.bucket || 'global') === key);
     if (!rows.length) return '';
-    return `<section><h2>${escapeHtml(label)}</h2><div class="grid">${rows.map(discoveryCard).join('')}</div></section>`;
+    return `<section><h2 class="section-title">${escapeHtml(label)}</h2><div class="grid">${rows.map(discoveryCard).join('')}</div></section>`;
   }).join('');
-
   return sections || `<div class="grid">${items.map(discoveryCard).join('')}</div>`;
 }
 
 function bindDiscoveryButtons(root) {
-  root.querySelectorAll('[data-inspect-gene]').forEach(btn => btn.addEventListener('click', async () => {
-    showStatus('Fetching the full UniProt record set…');
-    try {
-      const payload = await post('/api/explain', {
-        gene: btn.dataset.inspectGene,
-        taxon_id: Number(btn.dataset.inspectTaxon),
-        species_name: btn.dataset.inspectSpecies,
-      });
-      showStatus(''); renderReady(payload);
-      window.scrollTo({top: 0, behavior: 'smooth'});
-    } catch (err) { showStatus(err.message, true); }
+  root.querySelectorAll('[data-inspect-gene]').forEach(btn => btn.addEventListener('click', () => {
+    openGeneSet(btn.dataset.inspectGene, Number(btn.dataset.inspectTaxon), btn.dataset.inspectSpecies);
   }));
-
-  root.querySelectorAll('[data-inspect-accession]').forEach(btn => btn.addEventListener('click', async () => {
-    showStatus('Fetching the UniProt entry…');
-    try {
-      const payload = await post('/api/entry', {
-        accession: btn.dataset.inspectAccession,
-        species_name: btn.dataset.inspectSpecies,
-      });
-      showStatus(''); renderReady(payload);
-      window.scrollTo({top: 0, behavior: 'smooth'});
-    } catch (err) { showStatus(err.message, true); }
+  root.querySelectorAll('[data-inspect-accession]').forEach(btn => btn.addEventListener('click', () => {
+    openAccession(btn.dataset.inspectAccession, btn.dataset.inspectSpecies);
   }));
 }
 
@@ -203,23 +448,4 @@ $('lookup-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const query = $('query').value.trim();
   if (query) runLookup(query);
-});
-
-$('show-discovery').addEventListener('click', () => {
-  const panel = $('discovery-panel');
-  panel.hidden = !panel.hidden;
-});
-
-$('discovery-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const query = $('discovery-query').value.trim();
-  if (!query) return;
-  $('discovery-results').innerHTML = '<p>Checking UniProt…</p>';
-  try {
-    const data = await post('/api/discover', {query});
-    $('discovery-results').innerHTML = renderWarnings(data.warnings) + renderDiscoveryCards(data.results || []);
-    bindDiscoveryButtons($('discovery-results'));
-  } catch (err) {
-    $('discovery-results').innerHTML = `<div class="status warning">${escapeHtml(err.message)}</div>`;
-  }
 });

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .explain import explain_records
+from .explain import explain_records, load_external_annotations
 from .http import DataClient, SourceUnavailable
 from .query import concept_orthographic_variants, extract_search_concepts
 from .records import get_gene_name, get_protein_name
@@ -30,12 +30,11 @@ def _dedupe_warnings(warnings: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 class ProteinService:
-    """Web adapter around the final Colab search flow.
+    """Web adapter around the final Colab search logic.
 
-    The Colab behavior is the source of truth:
-      confirmed organism -> preserve biological concept -> strict search ->
-      direct name match in the mentioned species OR transparent discovery ->
-      broader related wording only after the strict concept fails.
+    The scientific/search behavior remains Colab-derived. The web adapter only
+    changes *when* work is done so that a user is not forced to wait for
+    duplicate searches or secondary databases before seeing UniProt results.
     """
 
     def __init__(self, client: DataClient | None = None) -> None:
@@ -60,9 +59,6 @@ class ProteinService:
         species_label = organism_name
         organism_resolution = "provided" if taxon_id is not None else None
 
-        # ------------------------------------------------------------
-        # OPTIONAL ORGANISM — conservative, same conceptual role as Colab.
-        # ------------------------------------------------------------
         if taxon_id is None and resolve_organism:
             species = resolve_species(query, self.client)
             warnings.extend(species.get("warnings", []))
@@ -100,9 +96,6 @@ class ProteinService:
 
         has_species = taxon_id is not None
 
-        # ------------------------------------------------------------
-        # PARSE THE BIOLOGICAL CONCEPT WITHOUT CHOOSING AN INTENT.
-        # ------------------------------------------------------------
         concept_info = extract_search_concepts(query, detected_phrase)
         original_strict_concept = normalize_text(str(concept_info.get("primary") or ""))
         strict_concept = normalize_text(confirmed_spelling or original_strict_concept)
@@ -126,67 +119,60 @@ class ProteinService:
                 "resolution": organism_resolution,
             }
 
-        def run_strict_or_related(phrases: list[str], *, allow_direct: bool) -> dict[str, Any]:
-            direct_groups: list[dict[str, Any]] = []
-            branch_warnings: list[dict[str, str]] = []
-
-            # Colab only treats a direct name match as the user's intended
-            # protein when an organism has been resolved/provided.
-            if has_species and allow_direct:
-                direct = direct_search_phrases(phrases, self.client, taxon_id=taxon_id)
-                branch_warnings.extend(direct.get("warnings", []))
-                direct_groups = group_direct_matches(direct.get("matches", []))
-
-            discovery = discovery_search(
-                phrases,
-                self.client,
-                taxon_id=taxon_id if has_species else None,
-                organism_name=species_label,
-            )
-            branch_warnings.extend(discovery.get("warnings", []))
-            return {
-                "direct_groups": direct_groups,
-                "discovery": discovery.get("results", []),
-                "warnings": _dedupe_warnings(branch_warnings),
-            }
-
         # ------------------------------------------------------------
-        # 1. STRICT SEARCH — preserve the full concept.
+        # STRICT SEARCH
         # ------------------------------------------------------------
-        strict = run_strict_or_related(strict_variants, allow_direct=True)
-        warnings.extend(strict["warnings"])
+        source_rows: list[dict[str, Any]] | None = None
+        direct_groups: list[dict[str, Any]] = []
 
-        if strict["direct_groups"]:
-            groups = strict["direct_groups"]
-            if len(groups) == 1:
-                group = groups[0]
-                return self.explain_gene(
-                    gene=str(group["gene"]),
-                    taxon_id=int(group["taxon_id"]),
-                    species_name=str(group["organism"]),
-                    inherited_warnings=warnings,
-                    search_context={
-                        "original_query": query,
-                        "search_concept": strict_concept,
-                        "mode": "strict",
-                        "direct_reasons": group.get("reasons", []),
-                    },
-                )
+        if has_species:
+            # One mentioned-organism search does double duty: it is used first
+            # for direct-name matching and then reused for source discovery.
+            direct = direct_search_phrases(strict_variants, self.client, taxon_id=taxon_id)
+            warnings.extend(direct.get("warnings", []))
+            source_rows = direct.get("search_records", [])
+            direct_groups = group_direct_matches(direct.get("matches", []))
 
-            return {
-                "status": "needs_protein_choice",
-                "message": (
-                    f'I found more than one direct UniProt protein/gene-name match for "{strict_concept}" '
-                    f'in {species_label or "the selected organism"}. Choose the protein you want to inspect.'
-                ),
-                "query": strict_concept,
-                "original_query": query,
-                "options": groups,
-                "organism": organism_payload(),
-                "warnings": _dedupe_warnings(warnings),
-            }
+            # A direct identity result does not wait for virus/global discovery.
+            if direct_groups:
+                if len(direct_groups) == 1:
+                    group = direct_groups[0]
+                    return self.explain_gene(
+                        gene=str(group["gene"]),
+                        taxon_id=int(group["taxon_id"]),
+                        species_name=str(group["organism"]),
+                        inherited_warnings=warnings,
+                        search_context={
+                            "original_query": query,
+                            "search_concept": strict_concept,
+                            "mode": "strict",
+                            "direct_reasons": group.get("reasons", []),
+                        },
+                    )
 
-        if strict["discovery"]:
+                return {
+                    "status": "needs_protein_choice",
+                    "message": (
+                        f'I found more than one direct UniProt protein/gene-name match for "{strict_concept}" '
+                        f'in {species_label or "the selected organism"}. Choose the protein you want to inspect.'
+                    ),
+                    "query": strict_concept,
+                    "original_query": query,
+                    "options": direct_groups,
+                    "organism": organism_payload(),
+                    "warnings": _dedupe_warnings(warnings),
+                }
+
+        strict_discovery = discovery_search(
+            strict_variants,
+            self.client,
+            taxon_id=taxon_id if has_species else None,
+            organism_name=species_label,
+            source_rows=source_rows,
+        )
+        warnings.extend(strict_discovery.get("warnings", []))
+
+        if strict_discovery.get("results"):
             return {
                 "status": "no_direct_match",
                 "query": strict_concept,
@@ -198,39 +184,30 @@ class ProteinService:
                 ),
                 "search_mode": "strict",
                 "organism": organism_payload(),
-                "discovery": strict["discovery"],
+                "discovery": strict_discovery["results"],
                 "warnings": _dedupe_warnings(warnings),
             }
 
         # ------------------------------------------------------------
-        # 2. DATABASE-GROUNDED SPELLING RECOVERY.
-        # No WordNet dependency: UniProt itself supplies/validates vocabulary.
-        # ------------------------------------------------------------
-        if has_species and confirmed_spelling is None:
-            suggestion, spelling_warnings = suggest_uniprot_wording_correction(
-                strict_concept, taxon_id, self.client
-            )
-            warnings.extend(spelling_warnings)
-            if suggestion:
-                return {
-                    "status": "needs_spelling_confirmation",
-                    "message": f'Did you mean "{suggestion["phrase"]}"?',
-                    "suggestion": suggestion,
-                    "original_query": query,
-                    "organism": organism_payload(),
-                    "warnings": _dedupe_warnings(warnings),
-                }
-
-        # ------------------------------------------------------------
-        # 3. RELATED DISCOVERY — explicit broader suffixes only after strict
-        #    search fails. Even a direct name match here remains discovery,
-        #    because it is not an exact match for the user's full concept.
+        # RELATED DISCOVERY
         # ------------------------------------------------------------
         for related_phrase in related_levels:
             related_variants = concept_orthographic_variants(related_phrase)
-            related = run_strict_or_related(related_variants, allow_direct=False)
-            warnings.extend(related["warnings"])
-            if related["discovery"]:
+            related_source_rows = None
+            if has_species:
+                related_source = direct_search_phrases(related_variants, self.client, taxon_id=taxon_id)
+                warnings.extend(related_source.get("warnings", []))
+                related_source_rows = related_source.get("search_records", [])
+
+            related = discovery_search(
+                related_variants,
+                self.client,
+                taxon_id=taxon_id if has_species else None,
+                organism_name=species_label,
+                source_rows=related_source_rows,
+            )
+            warnings.extend(related.get("warnings", []))
+            if related.get("results"):
                 return {
                     "status": "no_direct_match",
                     "query": related_phrase,
@@ -243,10 +220,12 @@ class ProteinService:
                     "search_mode": "related",
                     "related_from": original_strict_concept,
                     "organism": organism_payload(),
-                    "discovery": related["discovery"],
+                    "discovery": related["results"],
                     "warnings": _dedupe_warnings(warnings),
                 }
 
+        # Spelling recovery still exists, but is no longer allowed to hold up
+        # every zero-result web search. The UI can request it explicitly.
         return {
             "status": "no_direct_match",
             "query": strict_concept,
@@ -258,6 +237,7 @@ class ProteinService:
             "search_mode": "none",
             "organism": organism_payload(),
             "discovery": [],
+            "can_check_spelling": bool(has_species and confirmed_spelling is None),
             "warnings": _dedupe_warnings(warnings),
         }
 
@@ -285,9 +265,17 @@ class ProteinService:
             organism = records[0].get("organism", {}) or {}
             species_name = organism.get("commonName") or organism.get("scientificName") or str(taxon_id)
 
-        payload = explain_records(records, gene, species_name, self.client)
+        # Core explanations use UniProt only. Ensembl/APPRIS/gene-centric data
+        # is available through a lazy endpoint and does not block first paint.
+        payload = explain_records(records, gene, species_name, self.client, include_external=False)
         payload["status"] = "ready"
         payload["taxon_id"] = taxon_id
+        payload["accessions"] = [
+            str(record.get("primaryAccession"))
+            for record in records
+            if record.get("primaryAccession")
+        ]
+        payload["download_scope"] = {"mode": "gene", "gene": gene, "taxon_id": taxon_id}
         payload["warnings"] = _dedupe_warnings([*warnings, *payload.get("warnings", [])])
         if search_context:
             payload["search_context"] = search_context
@@ -314,9 +302,11 @@ class ProteinService:
         organism = record.get("organism", {}) or {}
         species = species_name or organism.get("commonName") or organism.get("scientificName") or "the source organism"
         gene = get_gene_name(record) or get_protein_name(record) or accession
-        payload = explain_records([record], str(gene), str(species), self.client)
+        payload = explain_records([record], str(gene), str(species), self.client, include_external=False)
         payload["status"] = "ready"
         payload["single_accession"] = accession
+        payload["accessions"] = [accession]
+        payload["download_scope"] = {"mode": "accessions", "accessions": [accession]}
         payload["warnings"] = _dedupe_warnings([*warnings, *payload.get("warnings", [])])
         return payload
 
@@ -330,3 +320,20 @@ class ProteinService:
             "warnings": payload["warnings"],
             "query": query,
         }
+
+    def check_spelling(self, phrase: str, taxon_id: int) -> dict[str, Any]:
+        suggestion, warnings = suggest_uniprot_wording_correction(phrase, taxon_id, self.client)
+        return {"suggestion": suggestion, "warnings": warnings}
+
+    def external_context(self, gene: str, taxon_id: int) -> dict[str, Any]:
+        records, warnings = fetch_all_records_for_gene(gene, taxon_id, self.client)
+        if not records:
+            return {
+                "status": "not_found",
+                "message": "No UniProtKB records were returned for that gene and organism.",
+                "warnings": warnings,
+            }
+        payload = load_external_annotations(records, self.client)
+        payload["status"] = "ready"
+        payload["warnings"] = _dedupe_warnings([*warnings, *payload.get("warnings", [])])
+        return payload

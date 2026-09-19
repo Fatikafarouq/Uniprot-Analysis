@@ -3,43 +3,31 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>UniProt Beginner Explainer</title>
+  <title>UniProt Explorer</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <main class="shell">
-    <header>
-      <p class="eyebrow">UniProt beginner explainer</p>
-      <h1>Start with the biology you actually have.</h1>
-      <p class="lede">Type a protein, gene, organism-specific question, or biological concept. We first look for a direct UniProt identity match; if there is none, we show only traceable discovery connections and explain why each one appeared.</p>
+    <header class="hero">
+      <p class="eyebrow">UniProt explorer</p>
+      <h1>Search UniProt in plain language.</h1>
+      <p class="lede">Enter a protein, gene, organism-specific query, or biological concept. The tool keeps direct identity matches separate from evidence-backed discovery and lets you open, filter, select, and download the underlying UniProt records.</p>
     </header>
 
     <section class="search-panel">
       <form id="lookup-form">
-        <label for="query">Protein, gene, or biological question</label>
+        <label for="query">Search</label>
         <div class="search-row">
-          <input id="query" name="query" placeholder="Try: TP53 in human, anthrax in humans, Li-Fraumeni syndrome" autocomplete="off" />
-          <button type="submit">Search UniProt</button>
+          <input id="query" name="query" placeholder="TP53 in human · anthrax in humans · Li-Fraumeni syndrome" autocomplete="off" />
+          <button id="search-button" type="submit">Search</button>
         </div>
       </form>
-      <button id="show-discovery" class="secondary" type="button">Open discovery-only mode</button>
+      <p class="hint">You do not need to choose a search mode first.</p>
     </section>
 
     <section id="status" class="status" hidden></section>
     <section id="choices" hidden></section>
     <section id="results" hidden></section>
-
-    <section id="discovery-panel" class="discovery-panel" hidden>
-      <h2>Discovery-only mode</h2>
-      <p>This skips direct identity explanation and looks only for traceable UniProt connections. The main search box now does this automatically when it cannot find a direct protein/gene identity match.</p>
-      <form id="discovery-form">
-        <div class="search-row">
-          <input id="discovery-query" placeholder="e.g. DNA repair" />
-          <button type="submit">Find traceable connections</button>
-        </div>
-      </form>
-      <div id="discovery-results"></div>
-    </section>
   </main>
 <script src="/static/app.js"></script>
 </body>

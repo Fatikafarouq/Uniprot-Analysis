@@ -388,8 +388,15 @@ def discovery_search(
     taxon_id: int | str | None = None,
     organism_name: str | None = None,
     limit: int = 36,
+    source_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Port the final Colab v16 three-path discovery flow into structured web output."""
+    """Colab three-path discovery flow with web-oriented request reuse.
+
+    When ``source_rows`` are supplied, they are reused for the mentioned
+    organism instead of repeating the same UniProt request that was already
+    used for direct-name matching. Virus-host and global branches are fetched
+    concurrently so discovery does not wait on them one after another.
+    """
     if isinstance(query, str):
         phrases = [normalize_text(query)]
     else:
@@ -401,11 +408,13 @@ def discovery_search(
     excluded_accessions: set[str] = set()
 
     if taxon_id is not None:
-        source_rows, source_warnings = search_uniprot_variants(
-            phrases, client, scope_clause=f"organism_id:{taxon_id}", size=100
-        )
-        warnings.extend(source_warnings)
-        source_options = build_discovery_gene_options(source_rows, phrases, limit=12)
+        if source_rows is None:
+            source_rows, source_warnings = search_uniprot_variants(
+                phrases, client, scope_clause=f"organism_id:{taxon_id}", size=100
+            )
+            warnings.extend(source_warnings)
+
+        source_options = build_discovery_gene_options(source_rows or [], phrases, limit=12)
         for gene, info in source_options.items():
             summary = summarise_option_records(info["search_records"], gene)
             first = info["search_records"][0]
@@ -442,10 +451,19 @@ def discovery_search(
                 }
             )
 
-        virus_rows, virus_warnings = search_uniprot_variants(
-            phrases, client, scope_clause=f"virus_host_id:{taxon_id}", size=100
-        )
-        warnings.extend(virus_warnings)
+        # Fetch the two remaining discovery paths in one concurrent batch.
+        query_groups: dict[str, list[str]] = {"virus": [], "global": []}
+        for phrase in phrases:
+            query_groups["virus"].append(_free_text_query(phrase, f"virus_host_id:{taxon_id}"))
+            query_groups["global"].append(_free_text_query(phrase, None))
+
+        all_queries = [*query_groups["virus"], *query_groups["global"]]
+        rows_by_query, concurrent_warnings = client.concurrent_uniprot_search(all_queries, size=100)
+        warnings.extend(concurrent_warnings)
+
+        virus_rows = _dedupe_records({q: rows_by_query.get(q, []) for q in query_groups["virus"]})
+        global_rows = _dedupe_records({q: rows_by_query.get(q, []) for q in query_groups["global"]})
+
         virus_options = build_virus_host_options(
             virus_rows, phrases, taxon_id, organism_name, limit=12
         )
@@ -453,9 +471,12 @@ def discovery_search(
         for item in virus_options:
             if item.get("accession"):
                 excluded_accessions.add(str(item["accession"]))
+    else:
+        global_rows, global_warnings = search_uniprot_variants(
+            phrases, client, scope_clause=None, size=100
+        )
+        warnings.extend(global_warnings)
 
-    global_rows, global_warnings = search_uniprot_variants(phrases, client, scope_clause=None, size=100)
-    warnings.extend(global_warnings)
     global_options = build_global_discovery_options(
         global_rows,
         phrases,
@@ -465,7 +486,6 @@ def discovery_search(
     )
     output.extend(global_options)
 
-    # Keep the Colab display philosophy: preserve section order, do not rank.
     return {
         "results": output[:limit],
         "warnings": _dedupe_warnings(warnings),
