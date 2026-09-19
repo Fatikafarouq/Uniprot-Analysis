@@ -8,6 +8,12 @@ from typing import Any
 from .text import normalize_text
 
 
+DIRECT_TOKEN_STOPWORDS = {
+    "a", "an", "and", "the", "of", "in", "for", "from",
+    "with", "to", "on", "by", "protein", "proteins", "gene", "genes",
+}
+
+
 def get_gene_name(record: dict[str, Any]) -> str | None:
     genes = record.get("genes", []) or []
     if genes:
@@ -18,20 +24,20 @@ def get_gene_name(record: dict[str, Any]) -> str | None:
 
 
 def get_all_gene_labels(record: dict[str, Any]) -> list[str]:
-    output: list[str] = []
-    for gene in record.get("genes", []) or []:
-        for key in ("geneName", "orderedLocusName", "orfNames"):
-            value = gene.get(key)
-            if isinstance(value, dict) and value.get("value"):
-                output.append(str(value["value"]))
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and item.get("value"):
-                        output.append(str(item["value"]))
-        for item in gene.get("synonyms", []) or []:
-            if isinstance(item, dict) and item.get("value"):
-                output.append(str(item["value"]))
-    return list(dict.fromkeys(output))
+    """Mirror the Colab v14 identity fields exactly: names, synonyms, locus and ORF names."""
+    labels: list[str] = []
+    for gene_block in record.get("genes", []) or []:
+        for key in ("geneName", "synonyms", "orderedLocusNames", "orfNames"):
+            value = gene_block.get(key)
+            if isinstance(value, dict):
+                value = [value]
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                label = item.get("value") if isinstance(item, dict) else item
+                if label:
+                    labels.append(str(label))
+    return list(dict.fromkeys(labels))
 
 
 def _name_value(node: Any) -> str | None:
@@ -51,12 +57,46 @@ def get_protein_name(record: dict[str, Any]) -> str | None:
     full = _name_value(recommended.get("fullName"))
     if full:
         return full
-    submission = description.get("submissionNames", []) or []
-    for item in submission:
-        full = _name_value(item.get("fullName", {}) if isinstance(item, dict) else None)
+    for item in description.get("submissionNames", []) or []:
+        if not isinstance(item, dict):
+            continue
+        full = _name_value(item.get("fullName"))
         if full:
             return full
     return None
+
+
+def _add_name_block(names: list[str], block: Any) -> None:
+    if not isinstance(block, dict):
+        return
+    full = block.get("fullName")
+    if isinstance(full, dict) and full.get("value"):
+        names.append(str(full["value"]))
+    for short in block.get("shortNames", []) or []:
+        if isinstance(short, dict) and short.get("value"):
+            names.append(str(short["value"]))
+
+
+def get_all_protein_search_names(record: dict[str, Any]) -> list[str]:
+    """Port of the Colab v14 protein-name collector, including components and short names."""
+    description = record.get("proteinDescription", {}) or {}
+    names: list[str] = []
+
+    _add_name_block(names, description.get("recommendedName"))
+    for key in ("submissionNames", "alternativeNames"):
+        for block in description.get(key, []) or []:
+            _add_name_block(names, block)
+
+    for component_key in ("includes", "contains"):
+        for component in description.get(component_key, []) or []:
+            if not isinstance(component, dict):
+                continue
+            _add_name_block(names, component.get("recommendedName"))
+            for key in ("submissionNames", "alternativeNames"):
+                for block in component.get(key, []) or []:
+                    _add_name_block(names, block)
+
+    return list(dict.fromkeys(names))
 
 
 def get_alternative_names(record: dict[str, Any]) -> list[str]:
@@ -65,42 +105,87 @@ def get_alternative_names(record: dict[str, Any]) -> list[str]:
     for item in description.get("alternativeNames", []) or []:
         if not isinstance(item, dict):
             continue
-        for key in ("fullName", "shortNames"):
-            node = item.get(key)
-            if isinstance(node, dict):
-                value = _name_value(node)
-                if value:
-                    output.append(value)
-            elif isinstance(node, list):
-                for child in node:
-                    value = _name_value(child)
-                    if value:
-                        output.append(value)
+        full = item.get("fullName")
+        if isinstance(full, dict) and full.get("value"):
+            output.append(str(full["value"]))
+        for short in item.get("shortNames", []) or []:
+            if isinstance(short, dict) and short.get("value"):
+                output.append(str(short["value"]))
     return list(dict.fromkeys(output))
 
 
-def get_all_protein_search_names(record: dict[str, Any]) -> list[str]:
-    names = [get_protein_name(record), *get_alternative_names(record)]
-    return [name for name in dict.fromkeys(names) if name]
+def meaningful_query_tokens(text: str) -> list[str]:
+    return [
+        token
+        for token in normalize_text(text).split()
+        if token not in DIRECT_TOKEN_STOPWORDS and len(token) > 1
+    ]
 
 
 def direct_match_details(record: dict[str, Any], query: str) -> dict[str, Any] | None:
-    """Only gene/protein identity fields can create a direct match."""
+    """Colab-v14 identity rule: only name fields qualify, with conservative name-only relaxation."""
     target = normalize_text(query)
     if not target:
         return None
 
-    gene_hits = [name for name in get_all_gene_labels(record) if normalize_text(name) == target]
-    protein_hits = [name for name in get_all_protein_search_names(record) if normalize_text(name) == target]
+    gene_labels = get_all_gene_labels(record)
+    protein_names = get_all_protein_search_names(record)
+    reasons: list[str] = []
+    gene_hits: list[str] = []
+    protein_hits: list[str] = []
 
-    if not gene_hits and not protein_hits:
+    for label in gene_labels:
+        if normalize_text(label) == target:
+            gene_hits.append(label)
+            reasons.append(f'Gene name matches "{label}" exactly.')
+
+    for name in protein_names:
+        if normalize_text(name) == target:
+            protein_hits.append(name)
+            reasons.append(f'Protein name matches "{name}" exactly.')
+
+    if not reasons and len(target) >= 3:
+        for name in protein_names:
+            candidate = normalize_text(name)
+            if target in candidate:
+                protein_hits.append(name)
+                reasons.append(
+                    f'The wording appears directly in the UniProt protein name "{name}".'
+                )
+
+    if not reasons:
+        query_tokens = meaningful_query_tokens(target)
+        if len(set(query_tokens)) >= 2:
+            query_set = set(query_tokens)
+            for name in protein_names:
+                candidate_tokens = set(meaningful_query_tokens(name))
+                if query_set.issubset(candidate_tokens):
+                    protein_hits.append(name)
+                    reasons.append(
+                        f'The key words occur in the UniProt protein name "{name}".'
+                    )
+
+    if not reasons:
         return None
+
     return {
-        "gene_matches": gene_hits,
-        "protein_matches": protein_hits,
+        "gene_matches": list(dict.fromkeys(gene_hits)),
+        "protein_matches": list(dict.fromkeys(protein_hits)),
         "gene": get_gene_name(record),
         "protein_name": get_protein_name(record),
+        "reasons": list(dict.fromkeys(reasons)),
     }
+
+
+def get_function_notes(record: dict[str, Any]) -> list[str]:
+    output: list[str] = []
+    for comment in record.get("comments", []) or []:
+        if comment.get("commentType") != "FUNCTION":
+            continue
+        for text in comment.get("texts", []) or []:
+            if isinstance(text, dict) and text.get("value"):
+                output.append(str(text["value"]))
+    return list(dict.fromkeys(output))
 
 
 def get_sequence(record: dict[str, Any]) -> str | None:

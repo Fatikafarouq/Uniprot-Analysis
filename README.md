@@ -1,49 +1,46 @@
-# UniProt Beginner Explainer — v15 web refactor
+# UniProt Beginner Explainer — v17 Colab-parity web build
 
-This is the web-ready refactor of the single-cell UniProt prototype.
+This build treats the final Colab prototype (`uniprot_single_cell_v16_explained_discovery`) as the source of truth for search/discovery behavior, then layers the web/product improvements on top.
 
-## What changed
+## Core behavior preserved from Colab
 
-- **No `input()` or `print()` in the core.** Core functions take arguments and return dictionaries.
-- **Three layers:** `app/core` (library), `app/main.py` (FastAPI), `app/static` (thin frontend).
-- **Persistent HTTP cache:** `requests-cache`, seven-day TTL by default.
-- **Concurrent independent searches:** taxonomy and UniProt search variants run concurrently.
-- **Batch full-record retrieval:** gene record sets use UniProtKB's `/stream` endpoint instead of fetching each accession serially.
-- **No runtime NLTK install/download.** Organism resolution uses UniProt Taxonomy scientific/common/synonym names only. If it cannot resolve confidently, it does not guess.
-- **Visible source failures:** source errors are logged and returned in `warnings` rather than silently shortening results.
-- **Reviewed vs unreviewed:** every result exposes Swiss-Prot/TrEMBL status and the result set starts with a plain-English count.
-- **Isoforms:** alternative products are exposed and explained separately from separate accessions.
-- **Evidence codes:** UniProt FUNCTION evidence is surfaced, with conservative plain-English categories for experimental, similarity-based, computational/model, and imported evidence.
-- **Generic domain comparison:** the old hard-coded VWFA comparison is gone. The explainer finds a genuinely common domain in the retrieved set and compares records against it only when the comparison is meaningful.
-- **Prominent links:** UniProt, AlphaFold DB, and PDB/PDB search links appear on each record.
-- **Golden tests:** 20+ tests enforce the provenance/no-invention behavior and the new beginner-facing features.
+- A single query can contain a protein/gene, organism, disease, phenotype, pathway, or conversational wording.
+- Organism resolution is conservative. A taxonomy hit validates a candidate; it does not silently invent organism intent.
+- The confirmed organism phrase is removed while preserving the biological concept.
+- Strict concept wording is searched first. Broader right-hand wording is used only after the strict concept fails and is explicitly labelled as related discovery.
+- Direct identity matches come only from UniProt protein/gene name fields. Disease/function/pathway/literature evidence cannot silently become identity evidence.
+- In a resolved organism, direct protein-name matches are grouped by gene. Selecting a gene fetches **all UniProtKB records for that gene + organism**.
+- Discovery keeps the three Colab paths: proteins from the mentioned organism, viral proteins linked by the host field, and global UniProt connections.
+- A discovery result remains selectable. If it has a gene + source taxon, selection opens **all UniProt records for that gene in that source organism**; otherwise it opens the individual accession.
+- Every discovery result explains exactly why it appeared; the tool does not invent a biological connection from unrelated metadata.
 
-## Run locally
+## Product/engineering improvements layered on top
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+- Core library + FastAPI API + frontend; no `input()` or `print()` in request logic.
+- `requests-cache` with a seven-day TTL locally; Vercel uses an in-memory cache because the deployed filesystem is read-only. The cache survives warm instances but is not a guaranteed cross-instance persistent cache.
+- Concurrent independent taxonomy/search requests.
+- Full gene record sets use UniProtKB `/stream` rather than serial accession fetches.
+- No runtime NLTK install/download. Organism resolution uses UniProt Taxonomy names/synonyms; spelling recovery is UniProt-grounded.
+- Source failures are logged and exposed to the user as warnings.
+- Reviewed (Swiss-Prot) vs unreviewed (TrEMBL) counts and labels.
+- Plain-English isoform explanation and exposed UniProt alternative products.
+- ECO evidence on FUNCTION annotations is surfaced conservatively.
+- Generic common-domain comparison; no VWFA-specific branch.
+- UniProt, AlphaFold DB, and PDB links on record cards.
+- Golden tests protect no-invention rules and Colab/web parity.
 
-Then open `http://127.0.0.1:8000`.
+## API
 
-## Run tests
+- `POST /api/lookup` — single front door; organism resolution, direct identity, or evidence-backed discovery.
+- `POST /api/explain` — fetch and explain all UniProt records for a gene + taxon.
+- `POST /api/entry` — inspect one accession when no gene-level expansion is possible.
+- `POST /api/discover` — explicit discovery-only mode.
+- `GET /api/health` — health/version check.
+
+## Tests
 
 ```bash
 pytest -q
 ```
 
-## API
-
-- `POST /api/lookup` — front-door protein/gene lookup.
-- `POST /api/explain` — explain all UniProt records for a known gene + taxon.
-- `POST /api/discover` — separate evidence-traceable discovery mode.
-- `GET /api/health` — health check.
-
-The API deliberately returns choice states instead of prompting in the middle of execution. For example, ambiguous organism wording returns `status: needs_organism_choice` with options for the frontend to render.
-
-## Important behavior retained from the prototype
-
-A direct match is still restricted to UniProt gene/protein-name fields. Function, disease, pathway, literature, or linked-database text cannot silently become a direct identity match. Discovery results are separate and include the exact UniProt-exposed field that caused them to appear.
+The current suite contains 32 golden/parity tests.

@@ -5,15 +5,16 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .core.service import ProteinService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="UniProt Beginner Explainer", version="0.16.0")
+app = FastAPI(title="UniProt Beginner Explainer", version="0.17.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,6 +34,7 @@ class LookupRequest(BaseModel):
     organism_name: str | None = None
     organism_phrase: str | None = None
     resolve_organism: bool = True
+    confirmed_spelling: str | None = None
 
 
 class ExplainRequest(BaseModel):
@@ -41,9 +43,26 @@ class ExplainRequest(BaseModel):
     species_name: str | None = None
 
 
+class EntryRequest(BaseModel):
+    accession: str = Field(min_length=1, max_length=50)
+    species_name: str | None = None
+
+
 class DiscoveryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=300)
     taxon_id: int | None = None
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request, exc: Exception):
+    logger.exception("Unhandled request failure for %s", request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "message": "The request could not be completed. Check the source notes or try again shortly.",
+        },
+    )
 
 
 @app.get("/")
@@ -53,7 +72,7 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.17.0"}
 
 
 @app.post("/api/lookup")
@@ -64,6 +83,7 @@ def lookup(request: LookupRequest):
         organism_name=request.organism_name,
         organism_phrase=request.organism_phrase,
         resolve_organism=request.resolve_organism,
+        confirmed_spelling=request.confirmed_spelling,
     )
 
 
@@ -72,6 +92,14 @@ def explain(request: ExplainRequest):
     return service.explain_gene(
         request.gene,
         request.taxon_id,
+        species_name=request.species_name,
+    )
+
+
+@app.post("/api/entry")
+def entry(request: EntryRequest):
+    return service.explain_accession(
+        request.accession,
         species_name=request.species_name,
     )
 

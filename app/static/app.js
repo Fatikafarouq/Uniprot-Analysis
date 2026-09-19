@@ -20,8 +20,10 @@ function renderWarnings(warnings=[]) {
 
 async function post(url, body) {
   const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  if (!response.ok) throw new Error(`Request failed (${response.status})`);
-  return response.json();
+  let payload = null;
+  try { payload = await response.json(); } catch (_) {}
+  if (!response.ok) throw new Error(payload?.message || `Request failed (${response.status})`);
+  return payload;
 }
 
 function resetMain() {
@@ -54,14 +56,25 @@ function renderLookup(data, originalQuery) {
     return;
   }
 
+  if (data.status === 'needs_spelling_confirmation') {
+    const suggestion = data.suggestion?.phrase || '';
+    choices.hidden = false;
+    choices.innerHTML = `<h2>Possible spelling correction</h2><p>${escapeHtml(data.message)}</p><p class="small">The suggestion comes from wording found in UniProt records for the resolved organism. It will not be used unless you confirm it.</p>${renderWarnings(data.warnings)}<div class="choice"><div><strong>${escapeHtml(suggestion)}</strong></div><div><button id="accept-spelling">Use this spelling</button> <button id="reject-spelling" class="secondary">Keep my wording</button></div></div>`;
+    $('accept-spelling').addEventListener('click', () => runLookup(originalQuery, {confirmed_spelling:suggestion}));
+    $('reject-spelling').addEventListener('click', () => runLookup(originalQuery, {confirmed_spelling:''}));
+    return;
+  }
+
   if (data.status === 'needs_protein_choice') {
     choices.hidden = false;
-    choices.innerHTML = `<h2>Choose the direct match you meant</h2><p>${escapeHtml(data.message)}</p>${renderWarnings(data.warnings)}` +
-      data.options.map(opt => `<div class="choice"><div><strong>${escapeHtml(opt.gene)}</strong><div>${escapeHtml(opt.organism)}${opt.scientific_name && opt.scientific_name !== opt.organism ? ` · <i>${escapeHtml(opt.scientific_name)}</i>` : ''}</div><div class="small">${escapeHtml(opt.record_count_in_search)} matching record(s) in this search</div></div><button data-gene="${escapeHtml(opt.gene)}" data-taxon="${opt.taxon_id}" data-species="${escapeHtml(opt.organism)}">Explain these records</button></div>`).join('');
+    choices.innerHTML = `<h2>Which protein did you mean?</h2><p>${escapeHtml(data.message)}</p>${renderWarnings(data.warnings)}` +
+      data.options.map(opt => `<div class="choice"><div><strong>${escapeHtml(opt.gene)}</strong><div>${escapeHtml(opt.organism)}${opt.scientific_name && opt.scientific_name !== opt.organism ? ` · <i>${escapeHtml(opt.scientific_name)}</i>` : ''}</div>${(opt.reasons || []).map(reason => `<div class="small">${escapeHtml(reason)}</div>`).join('')}<div class="small">${escapeHtml(opt.record_count_in_search)} UniProt search record(s) carried the direct name evidence.</div></div><button data-gene="${escapeHtml(opt.gene)}" data-taxon="${opt.taxon_id}" data-species="${escapeHtml(opt.organism)}">Explain all records</button></div>`).join('');
     choices.querySelectorAll('[data-gene]').forEach(btn => btn.addEventListener('click', async () => {
       showStatus('Fetching the full UniProt record set…');
-      const payload = await post('/api/explain', {gene:btn.dataset.gene, taxon_id:Number(btn.dataset.taxon), species_name:btn.dataset.species});
-      showStatus(''); renderReady(payload);
+      try {
+        const payload = await post('/api/explain', {gene:btn.dataset.gene, taxon_id:Number(btn.dataset.taxon), species_name:btn.dataset.species});
+        showStatus(''); renderReady(payload);
+      } catch (err) { showStatus(err.message, true); }
     }));
     return;
   }
@@ -71,7 +84,11 @@ function renderLookup(data, originalQuery) {
     const organismNote = data.organism?.name
       ? `<p class="small"><strong>Organism resolved:</strong> ${escapeHtml(data.organism.input_phrase || data.organism.name)} → ${escapeHtml(data.organism.name)}. Discovery is not restricted to that organism; other UniProt source organisms can appear when the evidence is traceable.</p>`
       : '';
-    results.innerHTML = `<div class="summary"><h2>No direct identity match</h2><p>${escapeHtml(data.message)}</p>${organismNote}<p>You can use the discovery results below, but they remain separate from direct gene/protein identity.</p></div>${renderWarnings(data.warnings)}${renderDiscoveryCards(data.discovery || [])}`;
+    const relatedNote = data.search_mode === 'related' && data.related_from
+      ? `<p class="small"><strong>Related search:</strong> These results use “${escapeHtml(data.query)}” because the full concept “${escapeHtml(data.related_from)}” produced no explainable result.</p>`
+      : '';
+    results.innerHTML = `<div class="summary"><h2>No direct identity match</h2><p>${escapeHtml(data.message)}</p>${organismNote}${relatedNote}<p>The cards below are discovery options. Each one shows the exact evidence that caused it to appear.</p></div>${renderWarnings(data.warnings)}${renderDiscoveryCards(data.discovery || [])}`;
+    bindDiscoveryButtons(results);
     return;
   }
 
@@ -80,6 +97,7 @@ function renderLookup(data, originalQuery) {
 
 function renderReady(data) {
   results.hidden = false;
+  choices.hidden = true;
   const cards = (data.records || []).map(item => {
     const r = item.record;
     const review = r.review || {};
@@ -109,16 +127,30 @@ function renderReady(data) {
     </article>`;
   }).join('');
 
-  results.innerHTML = `${renderWarnings(data.warnings)}<section class="summary"><h2>UniProt has ${escapeHtml(data.record_count)} record${data.record_count === 1 ? '' : 's'} for ${escapeHtml(data.gene)} in ${escapeHtml(data.species)}.</h2><p>${escapeHtml(data.review_summary)}</p><p>${escapeHtml(data.review_explanation)}</p>${data.isoform_explanation ? `<p><strong>Isoforms:</strong> ${escapeHtml(data.isoform_explanation)}</p>` : ''}<p class="small">The cards below are comparisons, not rankings or recommendations.</p></section><div class="grid">${cards}</div>`;
+  const directReasons = (data.search_context?.direct_reasons || []);
+  const contextHtml = directReasons.length ? `<div class="evidence-box"><strong>Why this was treated as a direct identity match:</strong><ul>${directReasons.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
+
+  results.innerHTML = `${renderWarnings(data.warnings)}<section class="summary"><h2>UniProt has ${escapeHtml(data.record_count)} record${data.record_count === 1 ? '' : 's'} for ${escapeHtml(data.gene)} in ${escapeHtml(data.species)}.</h2>${contextHtml}<p>${escapeHtml(data.review_summary)}</p><p>${escapeHtml(data.review_explanation)}</p>${data.isoform_explanation ? `<p><strong>Isoforms:</strong> ${escapeHtml(data.isoform_explanation)}</p>` : ''}<p class="small">The cards below are comparisons, not rankings or recommendations.</p></section><div class="grid">${cards}</div>`;
 }
 
 function discoveryCard(item) {
+  const inspect = item.inspect || {};
+  const inspectAttrs = inspect.mode === 'gene' && inspect.gene && inspect.taxon_id
+    ? `data-inspect-gene="${escapeHtml(inspect.gene)}" data-inspect-taxon="${escapeHtml(inspect.taxon_id)}" data-inspect-species="${escapeHtml(inspect.species_name || item.organism || '')}"`
+    : (inspect.accession ? `data-inspect-accession="${escapeHtml(inspect.accession)}" data-inspect-species="${escapeHtml(inspect.species_name || item.organism || '')}"` : '');
+  const buttonLabel = inspect.mode === 'gene' && inspect.gene ? `Explain all ${escapeHtml(inspect.gene)} records` : 'Inspect this UniProt entry';
+  const evidenceCount = item.evidence_record_count > 1 ? `<p class="small">${escapeHtml(item.evidence_record_count)} records for this gene carried qualifying evidence in the discovery search.</p>` : '';
+
   return `<article class="card">
     <h3>${escapeHtml(item.protein_name || item.gene || item.accession)}</h3>
-    <div class="meta">${escapeHtml(item.gene || 'No gene label')} · ${escapeHtml(item.organism || 'Unknown organism')} · ${escapeHtml(item.accession)}</div>
+    <div class="meta">${escapeHtml(item.gene || 'No gene label')} · ${escapeHtml(item.organism || 'Unknown organism')} · ${escapeHtml(item.accession || '')}</div>
     ${item.relationship ? `<p class="small"><strong>${escapeHtml(item.relationship)}</strong></p>` : ''}
-    <strong>Why this appeared</strong>
+    ${item.connection_explanation ? `<p>${escapeHtml(item.connection_explanation)}</p>` : ''}
+    ${item.function_note && item.evidence_type !== 'function' ? `<p><strong>What UniProt says it does:</strong> ${escapeHtml(item.function_note)}</p>` : ''}
+    ${evidenceCount}
+    <strong>Evidence shown by UniProt</strong>
     ${(item.why || []).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('')}
+    ${inspectAttrs ? `<div class="links"><button class="inspect-discovery" ${inspectAttrs}>${buttonLabel}</button></div>` : ''}
   </article>`;
 }
 
@@ -140,6 +172,33 @@ function renderDiscoveryCards(items) {
   return sections || `<div class="grid">${items.map(discoveryCard).join('')}</div>`;
 }
 
+function bindDiscoveryButtons(root) {
+  root.querySelectorAll('[data-inspect-gene]').forEach(btn => btn.addEventListener('click', async () => {
+    showStatus('Fetching the full UniProt record set…');
+    try {
+      const payload = await post('/api/explain', {
+        gene: btn.dataset.inspectGene,
+        taxon_id: Number(btn.dataset.inspectTaxon),
+        species_name: btn.dataset.inspectSpecies,
+      });
+      showStatus(''); renderReady(payload);
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    } catch (err) { showStatus(err.message, true); }
+  }));
+
+  root.querySelectorAll('[data-inspect-accession]').forEach(btn => btn.addEventListener('click', async () => {
+    showStatus('Fetching the UniProt entry…');
+    try {
+      const payload = await post('/api/entry', {
+        accession: btn.dataset.inspectAccession,
+        species_name: btn.dataset.inspectSpecies,
+      });
+      showStatus(''); renderReady(payload);
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    } catch (err) { showStatus(err.message, true); }
+  }));
+}
+
 $('lookup-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const query = $('query').value.trim();
@@ -159,6 +218,7 @@ $('discovery-form').addEventListener('submit', async (event) => {
   try {
     const data = await post('/api/discover', {query});
     $('discovery-results').innerHTML = renderWarnings(data.warnings) + renderDiscoveryCards(data.results || []);
+    bindDiscoveryButtons($('discovery-results'));
   } catch (err) {
     $('discovery-results').innerHTML = `<div class="status warning">${escapeHtml(err.message)}</div>`;
   }

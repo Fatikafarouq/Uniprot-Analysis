@@ -307,3 +307,138 @@ def test_discovery_can_be_explained_by_protein_name():
     contexts = annotation_match_contexts(record, "anthrax")
     assert contexts
     assert contexts[0]["source"] == "Protein name"
+
+# 26 — preserve Colab v16 direct-name behavior: a phrase inside a true protein name is direct identity evidence.
+def test_partial_phrase_inside_protein_name_is_direct_identity():
+    record = base_record(gene="ANTXR2", name="Anthrax toxin receptor 2")
+    match = direct_match_details(record, "anthrax")
+    assert match is not None
+    assert match["gene"] == "ANTXR2"
+    assert any("protein name" in reason.lower() for reason in match["reasons"])
+
+
+# 27 — preserve the actual UniProt field name used by the Colab prototype.
+def test_gene_labels_include_ordered_locus_names_plural_field():
+    from app.core.records import get_all_gene_labels
+
+    record = base_record()
+    record["genes"][0]["orderedLocusNames"] = [{"value": "LOC123"}]
+    assert "LOC123" in get_all_gene_labels(record)
+
+
+# 28 — protein-name identity search includes short names and component names, as in Colab v16.
+def test_protein_search_names_include_short_and_component_names():
+    from app.core.records import get_all_protein_search_names
+
+    record = base_record()
+    record["proteinDescription"] = {
+        "recommendedName": {
+            "fullName": {"value": "Long protein name"},
+            "shortNames": [{"value": "LPN"}],
+        },
+        "includes": [
+            {"recommendedName": {"fullName": {"value": "Catalytic component"}}}
+        ],
+    }
+    names = get_all_protein_search_names(record)
+    assert "LPN" in names
+    assert "Catalytic component" in names
+
+
+# 29 — mentioned-organism discovery is grouped by gene and remains inspectable as the full gene record set.
+def test_source_discovery_groups_by_gene_and_exposes_full_record_inspection():
+    from app.core.search import discovery_search
+
+    r1 = base_record("P1", gene="ANTXR2", name="Anthrax toxin receptor 2")
+    r2 = base_record("P2", gene="ANTXR2", name="Anthrax toxin receptor 2")
+    r1["comments"] = [{"commentType": "FUNCTION", "texts": [{"value": "Receptor involved in anthrax toxin uptake"}]}]
+    r2["keywords"] = [{"name": "Anthrax"}]
+
+    class Client:
+        def concurrent_uniprot_search(self, queries, size=100):
+            rows = {}
+            for q in queries:
+                if "organism_id:9606" in q and "virus_host_id" not in q:
+                    rows[q] = [r1, r2]
+                else:
+                    rows[q] = []
+            return rows, []
+
+    payload = discovery_search("anthrax", Client(), taxon_id=9606, organism_name="Human")
+    source = [item for item in payload["results"] if item["bucket"] == "mentioned_organism"]
+    assert len(source) == 1
+    assert source[0]["gene"] == "ANTXR2"
+    assert source[0]["inspect"]["mode"] == "gene"
+    assert source[0]["inspect"]["taxon_id"] == 9606
+    assert source[0]["evidence_record_count"] == 2
+
+
+# 30 — the main web front door restores the Colab behavior for "anthrax in humans":
+# direct protein-name matches in Human are offered as proteins to inspect.
+def test_lookup_anthrax_in_humans_returns_direct_protein_choices_when_name_fields_match():
+    from app.core.service import ProteinService
+
+    antxr1 = base_record("Q9H6X2", gene="ANTXR1", name="Anthrax toxin receptor 1")
+    antxr2 = base_record("P58335", gene="ANTXR2", name="Anthrax toxin receptor 2")
+
+    class Client:
+        def concurrent_taxonomy_search(self, terms, size=25):
+            human = {"scientificName": "Homo sapiens", "commonName": "Human", "taxonId": 9606, "rank": "species"}
+            return {term: ([human] if term == "human" else []) for term in terms}, []
+
+        def concurrent_uniprot_search(self, queries, size=100):
+            rows = {}
+            for q in queries:
+                if "organism_id:9606" in q and "anthrax" in q:
+                    rows[q] = [antxr1, antxr2]
+                else:
+                    rows[q] = []
+            return rows, []
+
+        def uniprot_search(self, query, size=30):
+            return []
+
+    result = ProteinService(Client()).lookup("anthrax in humans")
+    assert result["status"] == "needs_protein_choice"
+    assert {item["gene"] for item in result["options"]} == {"ANTXR1", "ANTXR2"}
+
+
+# 31 — without an organism, the tool does not silently choose one species even if a name match exists globally.
+def test_no_organism_does_not_silently_promote_global_direct_match():
+    from app.core.service import ProteinService
+
+    tp53 = base_record("P04637", gene="TP53", name="Cellular tumor antigen p53")
+
+    class Client:
+        def concurrent_taxonomy_search(self, terms, size=25):
+            return {term: [] for term in terms}, []
+
+        def concurrent_uniprot_search(self, queries, size=100):
+            return {q: ([tp53] if "tp53" in q.lower() else []) for q in queries}, []
+
+        def uniprot_search(self, query, size=30):
+            return []
+
+    result = ProteinService(Client()).lookup("TP53")
+    assert result["status"] == "no_direct_match"
+    assert result["organism"] is None
+    assert result["discovery"]
+
+
+# 32 — global discovery cards keep the Colab selection behavior: gene+source taxon opens all records.
+def test_global_discovery_exposes_gene_level_inspection_when_possible():
+    from app.core.search import discovery_search
+
+    record = base_record("P04637", gene="TP53", name="Cellular tumor antigen p53")
+    record["keywords"] = [{"name": "Li-Fraumeni syndrome"}]
+
+    class Client:
+        def concurrent_uniprot_search(self, queries, size=100):
+            return {q: [record] for q in queries}, []
+
+    payload = discovery_search("Li-Fraumeni syndrome", Client())
+    item = payload["results"][0]
+    assert item["bucket"] == "global"
+    assert item["inspect"]["mode"] == "gene"
+    assert item["inspect"]["gene"] == "TP53"
+    assert item["inspect"]["taxon_id"] == 9606

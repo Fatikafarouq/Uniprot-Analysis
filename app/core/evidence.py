@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .records import get_all_gene_labels, get_all_protein_search_names
-from .text import meaningful_tokens, normalize_text
+from .records import get_all_gene_labels, get_all_protein_search_names, get_alternative_names, meaningful_query_tokens
+from .text import normalize_text
 
 SEMANTIC_XREF_KEY_WORDS = {"term", "pathway", "disease", "phenotype", "process", "function"}
 
 
 def literature_title_identifies_record(record: dict[str, Any], title: str) -> bool:
+    """A literature title counts only if it identifies this record's protein/gene."""
     title_norm = normalize_text(title)
-    names = [*get_all_gene_labels(record), *get_all_protein_search_names(record)]
-    return any(normalize_text(name) in title_norm for name in names if normalize_text(name))
+    if not title_norm:
+        return False
+
+    labels = [*get_all_gene_labels(record), *get_all_protein_search_names(record), *get_alternative_names(record)]
+    seen: set[str] = set()
+    for label in labels:
+        label_norm = normalize_text(label)
+        if not label_norm or label_norm in seen or len(label_norm) < 3:
+            continue
+        seen.add(label_norm)
+        pattern = r"(?<![a-z0-9])" + re.escape(label_norm) + r"(?![a-z0-9])"
+        if re.search(pattern, title_norm):
+            return True
+    return False
 
 
 def recursive_strings(value: Any):
@@ -26,10 +40,7 @@ def recursive_strings(value: Any):
 
 
 def iter_discovery_strings(record: dict[str, Any]):
-    """Only expose fields that can explain why a broad UniProt search matched."""
-    # V16 behavior: names are legitimate discovery evidence. This is important
-    # for concepts such as "anthrax", where the explanatory text may be in a
-    # protein name rather than a FUNCTION/DISEASE comment.
+    """Port of the Colab v14 discovery evidence surface."""
     for name in get_all_protein_search_names(record):
         if name:
             yield "Protein name", str(name)
@@ -39,10 +50,10 @@ def iter_discovery_strings(record: dict[str, Any]):
             yield "Gene name or synonym", str(label)
 
     for comment in record.get("comments", []) or []:
-        comment_type = str(comment.get("commentType") or "ANNOTATION").replace("_", " ")
+        comment_type = str(comment.get("commentType", "ANNOTATION")).replace("_", " ")
         for value in recursive_strings(comment):
             if value:
-                yield f"UniProt {comment_type} comment", str(value)
+                yield comment_type, str(value)
 
     for keyword in record.get("keywords", []) or []:
         value = keyword.get("name") if isinstance(keyword, dict) else keyword
@@ -50,20 +61,26 @@ def iter_discovery_strings(record: dict[str, Any]):
             yield "UniProt keyword", str(value)
 
     for feature in record.get("features", []) or []:
+        feature_type = str(feature.get("type", "Feature"))
         description = feature.get("description")
         if description:
-            yield f"UniProt {feature.get('type', 'feature')} annotation", str(description)
+            yield f"{feature_type} annotation", str(description)
 
+    # Cross-reference values are eligible only when the property name itself
+    # describes semantic biological evidence. Generic identifiers are ignored.
     for xref in record.get("uniProtKBCrossReferences", []) or []:
-        database = str(xref.get("database") or "database")
+        database = str(xref.get("database", "database"))
         for prop in xref.get("properties", []) or []:
             if not isinstance(prop, dict):
                 continue
-            key = str(prop.get("key") or "")
             value = prop.get("value")
+            key = prop.get("key")
+            if not value or not key:
+                continue
             normalized_key = normalize_text(key).replace(" ", "")
-            if value and any(word in normalized_key for word in SEMANTIC_XREF_KEY_WORDS):
-                yield f"{database} cross-reference ({key})", str(value)
+            if not any(word in normalized_key for word in SEMANTIC_XREF_KEY_WORDS):
+                continue
+            yield f"{database} cross-reference ({key})", str(value)
 
     for reference in record.get("references", []) or []:
         citation = reference.get("citation", {}) or {}
@@ -73,29 +90,57 @@ def iter_discovery_strings(record: dict[str, Any]):
 
 
 def text_matches_query(text: str, query: str) -> bool:
-    haystack = normalize_text(text)
-    query_norm = normalize_text(query)
-    if not haystack or not query_norm:
+    candidate = normalize_text(text)
+    phrase = normalize_text(query)
+    if not candidate or not phrase:
         return False
-    if query_norm in haystack:
+    if phrase in candidate:
         return True
-    tokens = meaningful_tokens(query_norm)
-    return bool(tokens) and all(token in haystack for token in tokens)
+    tokens = meaningful_query_tokens(phrase) or phrase.split()
+    candidate_tokens = set(candidate.split())
+    return bool(tokens) and all(token in candidate_tokens for token in tokens)
+
+
+def shorten_match_text(text: str, phrase: str, limit: int = 260) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+
+    normalized_text = normalize_text(text)
+    query = normalize_text(phrase)
+    position = normalized_text.find(query)
+    if position < 0:
+        position = -1
+        for token in meaningful_query_tokens(query):
+            position = normalized_text.find(token)
+            if position >= 0:
+                break
+    if position < 0:
+        return text[: limit - 1] + "…"
+
+    start = max(0, position - limit // 3)
+    end = min(len(text), start + limit)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet += "…"
+    return snippet
 
 
 def annotation_match_contexts(record: dict[str, Any], query: str, max_items: int = 3) -> list[dict[str, str]]:
-    """A single source field must support the complete query; fields are never combined."""
+    """One source field must support the query; evidence is never stitched across fields."""
     contexts: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for source, value in iter_discovery_strings(record):
         clean = " ".join(str(value).split())
-        if not clean or not text_matches_query(clean, query):
-            continue
         signature = (source, clean)
-        if signature in seen:
+        if not clean or signature in seen:
             continue
         seen.add(signature)
-        contexts.append({"source": source, "text": clean})
+        if not text_matches_query(clean, query):
+            continue
+        contexts.append({"source": source, "text": shorten_match_text(clean, query)})
         if len(contexts) >= max_items:
             break
     return contexts
@@ -111,6 +156,84 @@ def annotation_match_contexts_for_phrases(
         if contexts:
             return contexts, phrase
     return [], None
+
+
+DISCOVERY_EVIDENCE_TYPES = {
+    "name_field": {"label": "Direct protein / gene name match"},
+    "source_organism": {"label": "Source organism match"},
+    "disease": {"label": "UniProt disease annotation"},
+    "function": {"label": "UniProt function annotation"},
+    "allergen": {"label": "UniProt allergen annotation"},
+    "pathway": {"label": "UniProt pathway annotation"},
+    "literature": {"label": "Literature linked by UniProt"},
+    "linked_database": {"label": "Linked database evidence"},
+    "name_field": {"label": "UniProt protein / gene name evidence"},
+    "other_uniprot": {"label": "Other UniProt annotation"},
+}
+
+
+def provenance_type_for_source(source: str | None) -> str:
+    source = str(source or "").strip()
+    upper = source.upper()
+    if upper == "DISEASE":
+        return "disease"
+    if upper == "FUNCTION":
+        return "function"
+    if upper == "ALLERGEN":
+        return "allergen"
+    if upper == "PATHWAY":
+        return "pathway"
+    if source in {"Source organism scientific name", "Source organism common name"}:
+        return "source_organism"
+    if source == "Reference title linked by UniProt":
+        return "literature"
+    if " cross-reference" in source:
+        return "linked_database"
+    if source in {"Protein name", "Gene name or synonym"}:
+        return "name_field"
+    return "other_uniprot"
+
+
+def classify_discovery_evidence(contexts: list[dict[str, str]]) -> str:
+    if not contexts:
+        return "other_uniprot"
+    return provenance_type_for_source(contexts[0].get("source"))
+
+
+
+def beginner_connection_explanation(evidence_type: str, phrase: str | None) -> str:
+    phrase = str(phrase or "the search concept")
+    explanations = {
+        "name_field": (
+            f'The protein or gene name itself contains "{phrase}". This is a name-level match.'
+        ),
+        "source_organism": (
+            f'The UniProt source-organism name contains "{phrase}". This tells you where the protein comes from; '
+            f'it does not by itself mean UniProt says the protein function is "{phrase}".'
+        ),
+        "disease": (
+            f'A UniProt DISEASE annotation for this protein mentions "{phrase}". The connection comes from disease annotation evidence.'
+        ),
+        "function": (
+            f"A UniProt FUNCTION annotation for this protein mentions \"{phrase}\". The connection comes from UniProt's description of the protein function."
+        ),
+        "allergen": (
+            f'A UniProt ALLERGEN annotation for this protein mentions "{phrase}".'
+        ),
+        "pathway": (
+            f'A UniProt PATHWAY annotation for this protein mentions "{phrase}".'
+        ),
+        "literature": (
+            f'A publication title linked by UniProt mentions "{phrase}" and also identifies this protein or gene.'
+        ),
+        "linked_database": (
+            f'A meaningful field in a database cross-reference carried by the UniProt record mentions "{phrase}".'
+        ),
+        "other_uniprot": (
+            f'Another traceable UniProt annotation contains "{phrase}". The exact annotation type is shown below.'
+        ),
+    }
+    return explanations.get(evidence_type, explanations["other_uniprot"])
 
 
 def evidence_label(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -169,8 +292,4 @@ def function_evidence(record: dict[str, Any]) -> dict[str, Any]:
     else:
         summary = "No UniProt FUNCTION comment was exposed for this record."
 
-    return {
-        "summary": summary,
-        "category_counts": category_counts,
-        "statements": statements,
-    }
+    return {"summary": summary, "category_counts": category_counts, "statements": statements}
