@@ -298,6 +298,40 @@ def build_explanations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return explained
 
 
+
+
+def build_difference_summary(records: list[dict[str, Any]]) -> list[str]:
+    """Summarise observable differences across a UniProt record set without ranking entries."""
+    if not records or len(records) == 1:
+        return []
+
+    notes: list[str] = []
+    lengths = sorted({record.get("length") for record in records if record.get("length") is not None})
+    if len(lengths) > 1:
+        notes.append(f"Sequence lengths vary from {lengths[0]} to {lengths[-1]} amino acids across the retrieved records.")
+
+    names = {str(record.get("name") or "").strip() for record in records if record.get("name")}
+    if len(names) > 1:
+        notes.append(f"UniProt uses {len(names)} different protein-name labels across this record set.")
+
+    transcript_count = sum(bool(record.get("transcript")) for record in records)
+    if 0 < transcript_count < len(records):
+        notes.append(f"{transcript_count} of {len(records)} records have an Ensembl transcript cross-reference; the others do not.")
+
+    existence = {str(record.get("existence") or "").strip() for record in records if record.get("existence")}
+    if len(existence) > 1:
+        notes.append("Protein-existence evidence differs across the records (for example protein-level, transcript-level, or inferred evidence).")
+
+    duplicate_pairs = sum(1 for record in records if record.get("duplicates"))
+    if duplicate_pairs:
+        notes.append(f"{duplicate_pairs} record{'s' if duplicate_pairs != 1 else ''} share an identical amino-acid sequence with at least one other accession in this set.")
+
+    isoform_entries = sum(bool(record.get("isoforms")) for record in records)
+    if isoform_entries:
+        notes.append(f"{isoform_entries} entr{'ies' if isoform_entries != 1 else 'y'} describe one or more UniProt isoforms inside the entry itself.")
+
+    return notes[:4]
+
 def explain_records(
     records: list[dict[str, Any]],
     gene: str,
@@ -338,6 +372,7 @@ def explain_records(
     )
 
     has_isoforms = any(item.get("isoforms") for item in comparison)
+    difference_summary = build_difference_summary(comparison)
 
     return {
         "gene": gene,
@@ -351,6 +386,7 @@ def explain_records(
             "Unreviewed (TrEMBL) entries are computationally annotated and await full manual review."
         ),
         "isoform_explanation": ISOFORM_EXPLANATION if has_isoforms else None,
+        "difference_summary": difference_summary,
         "records": explained,
         "warnings": warnings,
         "external_annotations": external,

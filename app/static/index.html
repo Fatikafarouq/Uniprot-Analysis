@@ -4,31 +4,32 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>UniProt Explorer</title>
+  <meta name="description" content="Search UniProt in plain language, compare records, inspect evidence, and download the underlying data." />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <main class="shell">
     <header class="hero">
-      <p class="eyebrow">UniProt explorer</p>
-      <h1>Search UniProt in plain language.</h1>
-      <p class="lede">Enter a protein, gene, organism-specific query, or biological concept. The tool keeps direct identity matches separate from evidence-backed discovery and lets you open, filter, select, and download the underlying UniProt records.</p>
+      <p class="eyebrow">UniProt Explorer</p>
+      <h1>Find the protein. Understand the records.</h1>
+      <p class="lede">Search a protein, gene, organism-specific query, or biological concept. Direct identity matches stay separate from evidence-backed discovery, and every result links back to the underlying UniProt data.</p>
     </header>
 
     <section class="search-panel">
       <form id="lookup-form">
-        <label for="query">Search</label>
+        <label for="query">Search UniProt</label>
         <div class="search-row">
-          <input id="query" name="query" placeholder="TP53 in human · anthrax in humans · Li-Fraumeni syndrome" autocomplete="off" />
+          <input id="query" name="query" placeholder="Try: TP53 in human, anthrax in humans, Li-Fraumeni syndrome" autocomplete="off" />
           <button id="search-button" type="submit">Search</button>
         </div>
       </form>
-      <p class="hint">You do not need to choose a search mode first.</p>
+      <p class="hint">No search mode to choose. The tool first checks direct identity, then traceable discovery when needed.</p>
     </section>
 
     <section id="status" class="status" hidden></section>
     <section id="choices" hidden></section>
     <section id="results" hidden></section>
   </main>
-<script src="/static/app.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

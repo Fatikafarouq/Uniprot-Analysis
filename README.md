@@ -1,30 +1,53 @@
-# UniProt Explorer — v18 smooth web MVP
+# UniProt Explorer — v20 consolidated MVP
 
-This build keeps the final Colab search/evidence rules as the scientific source of truth and improves the web product around them.
+This is the consolidated web build. It keeps the final Colab search/evidence rules as the scientific source of truth, while the web layer focuses on speed, clarity, downloads, and practical record comparison.
 
-## What the user can do
+## Core behavior
 
-- Search once in plain language: `TP53 in human`, `anthrax in humans`, `Li-Fraumeni syndrome`, etc.
-- See direct protein/gene identity matches separately from evidence-backed discovery.
-- Open the complete UniProt record set for a gene in its source organism.
-- See reviewed (Swiss-Prot) vs unreviewed (TrEMBL), isoforms, evidence, domains and links.
-- Filter a large record set by review status or text.
-- Select records and download the selection.
-- Download a whole gene record set or one entry as FASTA, TSV, JSON, XML or UniProt flat text.
-- Open UniProt, AlphaFold DB and PDB links.
-- Load Ensembl/APPRIS/gene-centric context only when wanted.
+- One plain-language search box: `TP53 in human`, `anthrax in humans`, `Li-Fraumeni syndrome`, etc.
+- Conservative organism resolution using UniProt Taxonomy.
+- Exact direct identity is preferred over incidental longer-name mentions.
+- If there is no exact identity, the Colab contained-name fallback and evidence-backed discovery remain available.
+- Direct identity, evidence-backed discovery, and unsupported/no-evidence results remain clearly separated.
+- A discovery result with a gene can open the complete UniProt record set for that gene in its source organism.
+- Evidence from separate fields is never combined to invent a biological relationship.
 
-## Why v18 is faster than v17
+## Record explanation
 
-The previous web adapter repeated work that the Colab notebook did not need to repeat in an interactive website. v18 keeps the search semantics but changes request timing:
+The first record screen now foregrounds the explanation rather than database clutter:
 
-1. A mentioned-organism UniProt search is performed once and reused for both direct-name matching and source-organism discovery.
-2. If a direct identity match is found, the app immediately retrieves that gene's record set and does not wait for unrelated global/virus discovery.
-3. If discovery is needed, virus-host and global branches run concurrently.
-4. Ensembl, APPRIS and UniProt gene-centric calls are lazy and do not block the first result page.
-5. Expensive spelling recovery is available on demand instead of delaying every zero-result search.
-6. Repeated browser requests in the same session are cached client-side; HTTP responses are also cached server-side while the Vercel instance is warm.
-7. Network retries are bounded so one slow upstream branch cannot hold the page for minutes.
+- total records;
+- reviewed vs unreviewed counts;
+- why the query was treated as a direct identity match;
+- a concise summary of what differs across the record set;
+- per-record comparison notes;
+- isoform information;
+- function evidence/ECO interpretation;
+- UniProt, AlphaFold and compact PDB access.
+
+Large PDB lists are deliberately collapsed to one `PDB structures (N)` link instead of rendering hundreds of structure links in every card.
+
+## Downloads
+
+Users can download:
+
+- the complete gene record set;
+- one individual UniProt entry;
+- a user-selected subset of records;
+
+in FASTA, TSV, JSON, XML, or UniProt flat text.
+
+## Performance safeguards
+
+- direct identity searches stop before unrelated discovery work;
+- mentioned-organism search rows are reused for discovery instead of fetched twice;
+- independent discovery branches run concurrently;
+- Ensembl/APPRIS/gene-centric context is lazy;
+- HTTP responses are cached;
+- retries are bounded to one retry for transient upstream failures;
+- normal API calls use a 10-second upstream timeout;
+- the browser stops a search after 45 seconds instead of leaving the user waiting for minutes;
+- repeated requests in the same browser session are cached in memory.
 
 ## Project layout
 
@@ -58,7 +81,9 @@ Run:
 PYTHONPATH=. pytest -q
 ```
 
-Current suite: 38 tests.
+Current suite: **43 tests**.
+
+The suite includes regression coverage for false evidence combination, literature provenance, reviewed/unreviewed classification, isoforms, ECO interpretation, generic domain comparison, exact-vs-contained identity matching, downloads, retry/cache recovery, record-set difference summaries, and compact UI handling for large PDB sets.
 
 ## Deployment
 

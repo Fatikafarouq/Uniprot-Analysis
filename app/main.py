@@ -18,7 +18,7 @@ from .core.service import ProteinService
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="UniProt Explorer", version="0.18.0")
+app = FastAPI(title="UniProt Explorer", version="0.20.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -102,9 +102,9 @@ def _download_response(query: str, fmt: str, filename: str):
         upstream = requests.get(
             UNIPROT_STREAM,
             params=params,
-            timeout=45,
+            timeout=30,
             stream=True,
-            headers={"User-Agent": "UniProtExplorer/0.18", "Accept": "*/*"},
+            headers={"User-Agent": "UniProtExplorer/0.20", "Accept": "*/*"},
         )
         upstream.raise_for_status()
     except requests.RequestException as exc:
@@ -142,7 +142,7 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "0.18.0"}
+    return {"status": "ok", "version": "0.20.0"}
 
 
 @app.post("/api/lookup")

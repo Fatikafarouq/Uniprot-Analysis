@@ -603,7 +603,7 @@ def test_http_client_retries_503_then_recovers_and_caches_success(tmp_path, monk
         )
 
         retry = client.session.get_adapter("http://").max_retries
-        assert retry.status == 2
+        assert retry.status == 1
         assert retry.backoff_factor > 0
         assert 503 in retry.status_forcelist
 
@@ -655,3 +655,37 @@ def test_contained_name_fallback_remains_when_no_exact_identity_exists():
     payload = direct_search_phrases(["anthrax"], Client(), taxon_id=9606)
     groups = group_direct_matches(payload["matches"])
     assert {group["gene"] for group in groups} == {"ANTXR1", "ANTXR2"}
+
+
+# 41 — the first-screen summary should explain observable differences across a multi-record set.
+def test_difference_summary_surfaces_record_set_variation():
+    from app.core.explain import build_difference_summary
+
+    rows = [
+        {"length": 90, "name": "Protein A", "transcript": "ENST1", "existence": "protein level", "duplicates": [], "isoforms": []},
+        {"length": 110, "name": "Protein A", "transcript": None, "existence": "transcript level", "duplicates": ["P3"], "isoforms": [{"ids": ["P2-1"]}]},
+        {"length": 110, "name": "Protein B", "transcript": "ENST2", "existence": "transcript level", "duplicates": ["P2"], "isoforms": []},
+    ]
+    notes = build_difference_summary(rows)
+    joined = " ".join(notes).lower()
+    assert "90" in joined and "110" in joined
+    assert "protein-name" in joined
+    assert "transcript" in joined
+
+# 42 — the browser UI must not explode a record card into hundreds of individual PDB links.
+def test_frontend_uses_compact_pdb_structure_link():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text()
+    assert "PDB structures (" in source
+    assert "PDB ${escapeHtml(x.id)}" not in source
+
+
+# 43 — the record page keeps the comparison explanation and practical downloads on the first screen.
+def test_frontend_keeps_comparison_summary_and_full_set_downloads_visible():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text()
+    assert "What differs across these records" in source
+    assert "Download full record set" in source
+    assert "What does reviewed vs unreviewed mean?" in source

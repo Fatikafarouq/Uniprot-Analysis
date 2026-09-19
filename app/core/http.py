@@ -58,7 +58,7 @@ class DataClient:
         self,
         cache_name: str | None = None,
         cache_days: int = 7,
-        timeout: int = 20,
+        timeout: int = 10,
         max_workers: int = 6,
     ) -> None:
         self.timeout = timeout
@@ -88,11 +88,11 @@ class DataClient:
             )
 
         retry = Retry(
-            total=2,
-            connect=2,
-            read=2,
-            status=2,
-            backoff_factor=0.35,
+            total=1,
+            connect=1,
+            read=1,
+            status=1,
+            backoff_factor=0.25,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=frozenset({"GET"}),
             respect_retry_after_header=True,
@@ -102,7 +102,7 @@ class DataClient:
         self.session.mount("http://", adapter)
         self.session.headers.update(
             {
-                "User-Agent": "UniProtExplorer/0.18 (educational prototype)",
+                "User-Agent": "UniProtExplorer/0.20 (educational prototype)",
                 "Accept": "application/json",
             }
         )

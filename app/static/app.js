@@ -63,6 +63,10 @@ function formatDownloadLinks(urlBuilder, label='Download') {
   return `<div class="download-group"><span class="download-label">${escapeHtml(label)}:</span>${['fasta','tsv','json','xml','txt'].map(fmt => `<a class="download-link" href="${urlBuilder(fmt)}">${fmt === 'txt' ? 'UniProt TXT' : fmt.toUpperCase()}</a>`).join('')}</div>`;
 }
 
+function compactDownloadMenu(urlBuilder, label='Download') {
+  return `<details class="download-menu"><summary>${escapeHtml(label)}</summary><div class="download-menu-body">${['fasta','tsv','json','xml','txt'].map(fmt => `<a class="download-link" href="${urlBuilder(fmt)}">${fmt === 'txt' ? 'UniProt TXT' : fmt.toUpperCase()}</a>`).join('')}</div></details>`;
+}
+
 async function downloadSelected(format) {
   const ids = [...selectedAccessions];
   if (!ids.length) {
@@ -110,23 +114,30 @@ async function runLookup(query, overrides={}) {
   const started = performance.now();
   showStatus('Searching UniProt…', false, true);
   const slowTimer = setTimeout(() => {
-    showStatus('UniProt is taking longer than usual, but the search is still running…', false, true);
-  }, 12000);
+    showStatus('Still working — checking UniProt records and traceable evidence…', false, true);
+  }, 8000);
+  const hardTimer = setTimeout(() => {
+    activeController?.abort();
+  }, 45000);
 
   try {
     const data = await cachedPost('/api/lookup', body, {signal: activeController.signal});
     clearTimeout(slowTimer);
+    clearTimeout(hardTimer);
     const elapsed = Math.max(0.1, (performance.now() - started) / 1000).toFixed(1);
     showStatus(`Search completed in ${elapsed}s.`);
-    setTimeout(() => { if (!statusBox.classList.contains('warning')) showStatus(''); }, 2200);
+    setTimeout(() => { if (!statusBox.classList.contains('warning')) showStatus(''); }, 1800);
     handleLookupResponse(data, query);
   } catch (err) {
     clearTimeout(slowTimer);
-    if (err.name === 'AbortError') return;
+    clearTimeout(hardTimer);
+    if (err.name === 'AbortError') {
+      showStatus('This search took longer than 45 seconds, so it was stopped. Try again; cached UniProt responses may make the next attempt faster.', true);
+      return;
+    }
     showStatus(err.message, true);
   }
 }
-
 function handleLookupResponse(data, originalQuery) {
   if (data.status === 'ready') {
     renderReady(data);
@@ -153,9 +164,9 @@ function handleLookupResponse(data, originalQuery) {
 
   if (data.status === 'needs_protein_choice') {
     choices.hidden = false;
-    choices.innerHTML = `<div class="summary"><h2>More than one direct protein/gene match</h2><p>${escapeHtml(data.message)}</p></div>${renderWarnings(data.warnings)}` +
+    choices.innerHTML = `<div class="summary"><h2>Choose the matching protein or gene</h2><p>${escapeHtml(data.message)}</p></div>${renderWarnings(data.warnings)}` +
       data.options.map(opt => {
-        const dl = opt.gene && opt.taxon_id ? formatDownloadLinks(fmt => geneDownloadUrl(opt.gene, opt.taxon_id, fmt), 'Download all records') : '';
+        const dl = opt.gene && opt.taxon_id ? compactDownloadMenu(fmt => geneDownloadUrl(opt.gene, opt.taxon_id, fmt), 'Download record set') : '';
         return `<div class="choice"><div><strong>${escapeHtml(opt.gene)}</strong><div>${escapeHtml(opt.organism)}${opt.scientific_name && opt.scientific_name !== opt.organism ? ` · <i>${escapeHtml(opt.scientific_name)}</i>` : ''}</div>${(opt.reasons || []).map(reason => `<div class="small">${escapeHtml(reason)}</div>`).join('')}<div class="small">${escapeHtml(opt.record_count_in_search)} search record(s) carried direct-name evidence.</div><div class="links">${dl}</div></div><div class="choice-actions"><button data-gene="${escapeHtml(opt.gene)}" data-taxon="${escapeHtml(opt.taxon_id)}" data-species="${escapeHtml(opt.organism)}">Open record set</button></div></div>`;
       }).join('');
     choices.querySelectorAll('[data-gene]').forEach(btn => btn.addEventListener('click', async () => {
@@ -241,23 +252,32 @@ function recordCard(item) {
   const links = r.links || {};
   const isoforms = r.isoforms || [];
   const accession = item.accession;
-  const pdbLinks = (links.pdb || []).map(x => `<a href="${x.url}" target="_blank" rel="noopener">PDB ${escapeHtml(x.id)}</a>`).join(' · ');
-  return `<article class="card" data-record-card data-review="${escapeHtml(review.status || 'unknown')}" data-accession="${escapeHtml(accession)}">
-    <div class="card-head"><div><span class="badge ${escapeHtml(review.status)}">${escapeHtml(review.label)}</span><h3>${escapeHtml(accession)}</h3></div><input class="card-select" type="checkbox" aria-label="Select ${escapeHtml(accession)}" data-select-accession="${escapeHtml(accession)}" ${selectedAccessions.has(accession) ? 'checked' : ''}></div>
-    <div class="meta">${escapeHtml(r.name)} · ${escapeHtml(item.length ?? 'unknown')} aa</div>
-    <ul>${(item.sentences || []).map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
-    <div class="evidence-box"><strong>Function evidence:</strong> ${escapeHtml(evidence.summary || 'Not available')}</div>
-    ${isoforms.length ? `<details><summary>Isoforms described in this entry (${isoforms.length})</summary><ul>${isoforms.map(i => `<li>${escapeHtml(i.ids?.join(', ') || i.name || 'Unnamed isoform')} — ${escapeHtml(i.sequence_status || 'status unavailable')}</li>`).join('')}</ul></details>` : ''}
-    <details><summary>Database details</summary><p><strong>Protein existence:</strong> ${escapeHtml(r.existence)}</p><p><strong>Ensembl transcript cross-reference:</strong> ${escapeHtml(r.transcript || 'Not returned by UniProt')}</p></details>
-    <div class="links">
-      ${links.uniprot ? `<a href="${links.uniprot}" target="_blank" rel="noopener">Open in UniProt</a>` : ''}
-      ${links.alphafold ? `<a href="${links.alphafold}" target="_blank" rel="noopener">AlphaFold DB</a>` : ''}
-      ${pdbLinks || (links.pdb_search ? `<a href="${links.pdb_search}" target="_blank" rel="noopener">Search PDB</a>` : '')}
+  const pdb = links.pdb || [];
+  const structureLink = pdb.length
+    ? `<a href="${links.pdb_search}" target="_blank" rel="noopener">PDB structures (${pdb.length})</a>`
+    : (links.pdb_search ? `<a href="${links.pdb_search}" target="_blank" rel="noopener">Search PDB</a>` : '');
+  const explanation = (item.sentences || []).length
+    ? `<ul class="difference-list">${item.sentences.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
+    : `<p class="small">No major differences were exposed by the comparison fields used in this prototype.</p>`;
+
+  return `<article class="card record-card" data-record-card data-review="${escapeHtml(review.status || 'unknown')}" data-accession="${escapeHtml(accession)}">
+    <div class="card-head">
+      <div><span class="badge ${escapeHtml(review.status)}">${escapeHtml(review.label)}</span><h3>${escapeHtml(accession)}</h3></div>
+      <label class="select-control"><input class="card-select" type="checkbox" aria-label="Select ${escapeHtml(accession)}" data-select-accession="${escapeHtml(accession)}" ${selectedAccessions.has(accession) ? 'checked' : ''}><span>Select</span></label>
     </div>
-    <div class="links">${formatDownloadLinks(fmt => entryDownloadUrl(accession, fmt), 'Download this record')}</div>
+    <div class="meta">${escapeHtml(r.name)} · ${escapeHtml(item.length ?? 'unknown')} aa${r.gene ? ` · ${escapeHtml(r.gene)}` : ''}</div>
+    <div class="card-section"><div class="card-section-title">What differs</div>${explanation}</div>
+    <div class="evidence-box"><strong>Function evidence</strong><div>${escapeHtml(evidence.summary || 'Not available')}</div></div>
+    ${isoforms.length ? `<details><summary>Isoforms described in this entry (${isoforms.length})</summary><ul>${isoforms.map(i => `<li>${escapeHtml(i.ids?.join(', ') || i.name || 'Unnamed isoform')} — ${escapeHtml(i.sequence_status || 'status unavailable')}</li>`).join('')}</ul></details>` : ''}
+    <details><summary>Database details</summary><div class="detail-grid"><div><span>Protein existence</span><strong>${escapeHtml(r.existence)}</strong></div><div><span>Ensembl transcript</span><strong>${escapeHtml(r.transcript || 'Not returned')}</strong></div></div></details>
+    <div class="record-actions">
+      ${links.uniprot ? `<a class="button-link secondary" href="${links.uniprot}" target="_blank" rel="noopener">UniProt</a>` : ''}
+      ${links.alphafold ? `<a class="button-link secondary" href="${links.alphafold}" target="_blank" rel="noopener">AlphaFold</a>` : ''}
+      ${structureLink ? `<span class="structure-link">${structureLink}</span>` : ''}
+      ${compactDownloadMenu(fmt => entryDownloadUrl(accession, fmt), 'Download record')}
+    </div>
   </article>`;
 }
-
 function renderReady(data) {
   currentReady = data;
   currentFilter = 'all';
@@ -268,33 +288,41 @@ function renderReady(data) {
   results.hidden = false;
 
   const directReasons = data.search_context?.direct_reasons || [];
-  const contextHtml = directReasons.length ? `<div class="evidence-box"><strong>Why this was treated as a direct identity match:</strong><ul>${directReasons.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
+  const contextHtml = directReasons.length ? `<div class="identity-note"><strong>Why this matched directly</strong><ul>${directReasons.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
+  const differenceSummary = (data.difference_summary || []).length
+    ? `<div class="difference-summary"><h3>What differs across these records</h3><ul>${data.difference_summary.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>`
+    : '';
   const allDownloads = data.download_scope?.mode === 'gene'
     ? formatDownloadLinks(fmt => geneDownloadUrl(data.download_scope.gene, data.download_scope.taxon_id, fmt), 'Download full record set')
     : formatDownloadLinks(fmt => entryDownloadUrl(data.accessions?.[0], fmt), 'Download record');
 
   results.innerHTML = `${renderWarnings(data.warnings)}
-    <section class="summary">
-      <h2>${escapeHtml(data.gene)} · ${escapeHtml(data.species)}</h2>
-      <p><strong>${escapeHtml(data.record_count)} UniProtKB record${data.record_count === 1 ? '' : 's'}.</strong> ${escapeHtml(data.review_summary)}</p>
+    <section class="summary result-summary">
+      <div class="summary-topline"><div><p class="eyebrow">Record explanation</p><h2>${escapeHtml(data.gene)} <span>in ${escapeHtml(data.species)}</span></h2></div><div class="record-count"><strong>${escapeHtml(data.record_count)}</strong><span>UniProtKB record${data.record_count === 1 ? '' : 's'}</span></div></div>
+      <div class="review-strip"><span class="badge reviewed">${escapeHtml(data.reviewed_count ?? 0)} reviewed</span><span class="badge unreviewed">${escapeHtml(data.unreviewed_count ?? 0)} unreviewed</span></div>
       ${contextHtml}
-      <p>${escapeHtml(data.review_explanation)}</p>
-      ${data.isoform_explanation ? `<p><strong>Isoforms:</strong> ${escapeHtml(data.isoform_explanation)}</p>` : ''}
-      <div class="links">${allDownloads}</div>
-      ${data.download_scope?.mode === 'gene' ? `<div class="links"><button class="secondary" id="load-external">Load Ensembl / APPRIS context</button></div><div id="external-panel" class="external-panel"></div>` : ''}
+      ${differenceSummary}
+      <div class="summary-actions">${allDownloads}</div>
+      <div class="learn-row">
+        <details><summary>What does reviewed vs unreviewed mean?</summary><p>${escapeHtml(data.review_explanation)}</p></details>
+        ${data.isoform_explanation ? `<details><summary>What is a UniProt isoform?</summary><p>${escapeHtml(data.isoform_explanation)}</p></details>` : ''}
+      </div>
+      ${data.download_scope?.mode === 'gene' ? `<div class="secondary-context"><button class="tertiary" id="load-external">Load Ensembl / APPRIS context</button><div id="external-panel" class="external-panel"></div></div>` : ''}
     </section>
     <section class="toolbar">
       <div class="toolbar-row">
-        <button class="filter-button active" data-filter="all">All (${escapeHtml(data.record_count)})</button>
-        <button class="filter-button secondary" data-filter="reviewed">Reviewed (${escapeHtml(data.reviewed_count ?? 0)})</button>
-        <button class="filter-button secondary" data-filter="unreviewed">Unreviewed (${escapeHtml(data.unreviewed_count ?? 0)})</button>
-        <input id="record-search" placeholder="Filter by accession, protein name, gene or transcript" />
+        <div class="segmented" role="group" aria-label="Filter records">
+          <button class="filter-button active" data-filter="all">All ${escapeHtml(data.record_count)}</button>
+          <button class="filter-button secondary" data-filter="reviewed">Reviewed ${escapeHtml(data.reviewed_count ?? 0)}</button>
+          <button class="filter-button secondary" data-filter="unreviewed">Unreviewed ${escapeHtml(data.unreviewed_count ?? 0)}</button>
+        </div>
+        <input id="record-search" placeholder="Filter records by accession, name, gene or transcript" />
       </div>
-      <div class="toolbar-row">
+      <div class="toolbar-row selection-row">
         <button class="secondary" id="select-visible">Select visible</button>
-        <button class="secondary" id="clear-selection">Clear selection</button>
+        <button class="tertiary" id="clear-selection">Clear</button>
         <span class="small" id="selection-count">0 selected</span>
-        <div class="download-group"><span class="download-label">Download selected:</span>${['fasta','tsv','json','xml','txt'].map(fmt => `<button class="secondary selected-download" data-format="${fmt}">${fmt === 'txt' ? 'TXT' : fmt.toUpperCase()}</button>`).join('')}</div>
+        <div class="selected-actions"><span class="download-label">Download selected</span>${['fasta','tsv','json','xml','txt'].map(fmt => `<button class="secondary selected-download" data-format="${fmt}">${fmt === 'txt' ? 'TXT' : fmt.toUpperCase()}</button>`).join('')}</div>
       </div>
     </section>
     <div id="record-grid" class="grid"></div>
@@ -304,7 +332,6 @@ function renderReady(data) {
   bindReadyControls();
   renderRecordGrid();
 }
-
 function bindReadyControls() {
   results.querySelectorAll('[data-filter]').forEach(btn => btn.addEventListener('click', () => {
     currentFilter = btn.dataset.filter;
@@ -399,27 +426,27 @@ function discoveryCard(item) {
   const inspectAttrs = isGene
     ? `data-inspect-gene="${escapeHtml(inspect.gene)}" data-inspect-taxon="${escapeHtml(inspect.taxon_id)}" data-inspect-species="${escapeHtml(inspect.species_name || item.organism || '')}"`
     : (inspect.accession ? `data-inspect-accession="${escapeHtml(inspect.accession)}" data-inspect-species="${escapeHtml(inspect.species_name || item.organism || '')}"` : '');
-  const buttonLabel = isGene ? `Open all ${escapeHtml(inspect.gene)} records` : 'Open this UniProt entry';
+  const buttonLabel = isGene ? `Open ${escapeHtml(inspect.gene)} record set` : 'Open UniProt entry';
   const evidenceCount = item.evidence_record_count > 1 ? `<p class="small">${escapeHtml(item.evidence_record_count)} search records for this gene carried qualifying evidence.</p>` : '';
   const dl = isGene
-    ? formatDownloadLinks(fmt => geneDownloadUrl(inspect.gene, inspect.taxon_id, fmt), 'Download record set')
-    : (inspect.accession ? formatDownloadLinks(fmt => entryDownloadUrl(inspect.accession, fmt), 'Download entry') : '');
-  const uniLink = item.accession ? `<a href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(item.accession)}/entry" target="_blank" rel="noopener">Open evidence entry in UniProt</a>` : '';
+    ? compactDownloadMenu(fmt => geneDownloadUrl(inspect.gene, inspect.taxon_id, fmt), 'Download record set')
+    : (inspect.accession ? compactDownloadMenu(fmt => entryDownloadUrl(inspect.accession, fmt), 'Download entry') : '');
+  const uniLink = item.accession ? `<a href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(item.accession)}/entry" target="_blank" rel="noopener">Evidence entry</a>` : '';
+  const contexts = item.why || [];
+  const visibleEvidence = contexts.slice(0, 2).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('');
+  const moreEvidence = contexts.length > 2 ? `<details><summary>More evidence (${contexts.length - 2})</summary>${contexts.slice(2).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('')}</details>` : '';
 
-  return `<article class="card">
-    <h3>${escapeHtml(item.protein_name || item.gene || item.accession)}</h3>
-    <div class="meta">${escapeHtml(item.gene || 'No gene label')} · ${escapeHtml(item.organism || 'Unknown organism')} · ${escapeHtml(item.accession || '')}</div>
-    ${item.relationship ? `<p class="small"><strong>${escapeHtml(item.relationship)}</strong></p>` : ''}
+  return `<article class="card discovery-card">
+    <div class="card-head"><div><h3>${escapeHtml(item.protein_name || item.gene || item.accession)}</h3><div class="meta">${escapeHtml(item.gene || 'No gene label')} · ${escapeHtml(item.organism || 'Unknown organism')} · ${escapeHtml(item.accession || '')}</div></div></div>
+    ${item.relationship ? `<span class="relationship-chip">${escapeHtml(item.relationship)}</span>` : ''}
     ${item.connection_explanation ? `<p>${escapeHtml(item.connection_explanation)}</p>` : ''}
-    ${item.function_note && item.evidence_type !== 'function' ? `<p><strong>What UniProt says it does:</strong> ${escapeHtml(item.function_note)}</p>` : ''}
+    ${item.function_note && item.evidence_type !== 'function' ? `<p class="small"><strong>UniProt function:</strong> ${escapeHtml(item.function_note)}</p>` : ''}
     ${evidenceCount}
-    <strong>Why this appeared</strong>
-    ${(item.why || []).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('')}
-    <div class="links">${inspectAttrs ? `<button class="inspect-discovery" ${inspectAttrs}>${buttonLabel}</button>` : ''}${uniLink}</div>
-    <div class="links">${dl}</div>
+    <div class="card-section-title">Why this appeared</div>
+    ${visibleEvidence}${moreEvidence}
+    <div class="record-actions">${inspectAttrs ? `<button class="inspect-discovery" ${inspectAttrs}>${buttonLabel}</button>` : ''}${uniLink}${dl}</div>
   </article>`;
 }
-
 function renderDiscoveryCards(items) {
   if (!items.length) return `<div class="summary empty"><p>No traceable discovery result was found.</p></div>`;
   const groups = [
