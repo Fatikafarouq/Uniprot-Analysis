@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from pathlib import Path
@@ -40,7 +42,17 @@ class SourceUnavailable(RuntimeError):
 
 
 class DataClient:
-    """HTTP access layer with persistent caching, retries, and explicit failures."""
+    """HTTP access layer with caching, retries, concurrency, and explicit failures.
+
+    Local development uses a SQLite cache in ``.cache``.
+    Vercel functions use an in-memory cache because the deployed application
+    directory is read-only. This avoids request failures caused by SQLite
+    trying to write under ``/var/task``.
+
+    The Vercel cache survives while a function instance stays warm. A remote
+    cache (for example Redis/KV) can be added later if cross-instance,
+    multi-day persistence is needed.
+    """
 
     def __init__(
         self,
@@ -49,20 +61,31 @@ class DataClient:
         timeout: int = 30,
         max_workers: int = 6,
     ) -> None:
-        if cache_name is None:
-            cache_dir = Path(".cache")
-            cache_dir.mkdir(exist_ok=True)
-            cache_name = str(cache_dir / "uniprot_http")
-
         self.timeout = timeout
         self.max_workers = max_workers
-        self.session = requests_cache.CachedSession(
-            cache_name=cache_name,
-            backend="sqlite",
-            expire_after=timedelta(days=cache_days),
-            allowable_methods=("GET",),
-            stale_if_error=True,
-        )
+
+        if os.getenv("VERCEL"):
+            # Vercel's deployed code directory is read-only. Using the memory
+            # backend prevents SQLite from trying to create/write a DB there.
+            self.session = requests_cache.CachedSession(
+                backend="memory",
+                expire_after=timedelta(days=cache_days),
+                allowable_methods=("GET",),
+                stale_if_error=True,
+            )
+        else:
+            if cache_name is None:
+                cache_dir = Path(".cache")
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_name = str(cache_dir / "uniprot_http")
+
+            self.session = requests_cache.CachedSession(
+                cache_name=cache_name,
+                backend="sqlite",
+                expire_after=timedelta(days=cache_days),
+                allowable_methods=("GET",),
+                stale_if_error=True,
+            )
 
         retry = Retry(
             total=3,
