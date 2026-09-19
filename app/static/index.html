@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>UniProt Beginner Explainer</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <p class="eyebrow">UniProt beginner explainer</p>
+      <h1>Why does UniProt give me several records for this protein?</h1>
+      <p class="lede">Type a protein or gene. We show every matching UniProt record, what differs, and where each claim comes from. We do not pick a “best” record for you.</p>
+    </header>
+
+    <section class="search-panel">
+      <form id="lookup-form">
+        <label for="query">Protein or gene</label>
+        <div class="search-row">
+          <input id="query" name="query" placeholder="Try: TP53 in human" autocomplete="off" />
+          <button type="submit">Explain the records</button>
+        </div>
+      </form>
+      <button id="show-discovery" class="secondary" type="button">Explore by biological concept instead</button>
+    </section>
+
+    <section id="status" class="status" hidden></section>
+    <section id="choices" hidden></section>
+    <section id="results" hidden></section>
+
+    <section id="discovery-panel" class="discovery-panel" hidden>
+      <h2>Discovery mode</h2>
+      <p>This is separate from direct protein/gene identity matching. A result appears only when one UniProt-exposed annotation, linked database field, or linked literature title contains traceable evidence for your wording.</p>
+      <form id="discovery-form">
+        <div class="search-row">
+          <input id="discovery-query" placeholder="e.g. DNA repair" />
+          <button type="submit">Find traceable connections</button>
+        </div>
+      </form>
+      <div id="discovery-results"></div>
+    </section>
+  </main>
+<script src="/static/app.js"></script>
+</body>
+</html>
