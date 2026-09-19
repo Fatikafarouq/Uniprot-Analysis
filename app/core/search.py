@@ -110,6 +110,18 @@ def direct_search_phrases(
                 continue
             seen.add(key)
             matches.append({"record": record, "match": details, "matched_phrase": phrase})
+
+    # Identity-first rule: if any record exactly matches a UniProt gene label
+    # or protein name, do not present weaker substring/name-containing hits as
+    # competing direct identities. Those weaker hits remain discoverable when
+    # there is no exact identity, preserving the Colab behaviour for searches
+    # such as "anthrax" -> Anthrax toxin receptor 1/2.
+    if any(item.get("match", {}).get("match_strength") == "exact" for item in matches):
+        matches = [
+            item for item in matches
+            if item.get("match", {}).get("match_strength") == "exact"
+        ]
+
     return {"matches": matches, "warnings": warnings, "search_records": rows}
 
 

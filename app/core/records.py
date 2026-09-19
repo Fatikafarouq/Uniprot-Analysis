@@ -168,12 +168,22 @@ def direct_match_details(record: dict[str, Any], query: str) -> dict[str, Any] |
     if not reasons:
         return None
 
+    # Preserve the Colab fallback behaviour, but expose whether the match was
+    # an exact identity or only wording contained inside a longer protein name.
+    # The service can then prefer a true identity when one exists instead of
+    # making a beginner choose between INS and unrelated proteins whose names
+    # merely mention insulin.
+    match_strength = "exact" if (gene_hits or protein_hits and any(
+        normalize_text(name) == target for name in protein_hits
+    )) else "contained"
+
     return {
         "gene_matches": list(dict.fromkeys(gene_hits)),
         "protein_matches": list(dict.fromkeys(protein_hits)),
         "gene": get_gene_name(record),
         "protein_name": get_protein_name(record),
         "reasons": list(dict.fromkeys(reasons)),
+        "match_strength": match_strength,
     }
 
 

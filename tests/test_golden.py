@@ -621,3 +621,37 @@ def test_http_client_retries_503_then_recovers_and_caches_success(tmp_path, monk
         server.server_close()
         thread.join(timeout=2)
 
+
+# 39 — when an exact protein identity exists, longer protein names that merely
+# contain the same word must not compete with it as direct identities.
+def test_exact_identity_beats_longer_name_mentions():
+    from app.core.search import direct_search_phrases, group_direct_matches
+
+    insulin = base_record("P01308", gene="INS", name="Insulin")
+    atp5mk = base_record("Q9H2K0", gene="ATP5MK", name="Diabetes-associated protein in insulin-sensitive tissues")
+    baiap2 = base_record("Q9UQB8", gene="BAIAP2", name="Insulin receptor substrate p53/p58")
+
+    class Client:
+        def concurrent_uniprot_search(self, queries, size=100):
+            return {q: [insulin, atp5mk, baiap2] for q in queries}, []
+
+    payload = direct_search_phrases(["insulin"], Client(), taxon_id=9606)
+    groups = group_direct_matches(payload["matches"])
+    assert [group["gene"] for group in groups] == ["INS"]
+
+
+# 40 — if there is no exact identity, preserve the Colab contained-name
+# fallback used by discovery-like protein names such as anthrax toxin receptors.
+def test_contained_name_fallback_remains_when_no_exact_identity_exists():
+    from app.core.search import direct_search_phrases, group_direct_matches
+
+    antxr1 = base_record("Q9H6X2", gene="ANTXR1", name="Anthrax toxin receptor 1")
+    antxr2 = base_record("P58335", gene="ANTXR2", name="Anthrax toxin receptor 2")
+
+    class Client:
+        def concurrent_uniprot_search(self, queries, size=100):
+            return {q: [antxr1, antxr2] for q in queries}, []
+
+    payload = direct_search_phrases(["anthrax"], Client(), taxon_id=9606)
+    groups = group_direct_matches(payload["matches"])
+    assert {group["gene"] for group in groups} == {"ANTXR1", "ANTXR2"}
