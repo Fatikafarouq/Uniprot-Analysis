@@ -68,7 +68,10 @@ function renderLookup(data, originalQuery) {
 
   if (data.status === 'no_direct_match') {
     results.hidden = false;
-    results.innerHTML = `<div class="summary"><h2>No direct identity match</h2><p>${escapeHtml(data.message)}</p><p>You can use the discovery results below, but they are deliberately kept separate from direct gene/protein identity.</p></div>${renderWarnings(data.warnings)}${renderDiscoveryCards(data.discovery || [])}`;
+    const organismNote = data.organism?.name
+      ? `<p class="small"><strong>Organism resolved:</strong> ${escapeHtml(data.organism.input_phrase || data.organism.name)} → ${escapeHtml(data.organism.name)}. Discovery is not restricted to that organism; other UniProt source organisms can appear when the evidence is traceable.</p>`
+      : '';
+    results.innerHTML = `<div class="summary"><h2>No direct identity match</h2><p>${escapeHtml(data.message)}</p>${organismNote}<p>You can use the discovery results below, but they remain separate from direct gene/protein identity.</p></div>${renderWarnings(data.warnings)}${renderDiscoveryCards(data.discovery || [])}`;
     return;
   }
 
@@ -109,9 +112,32 @@ function renderReady(data) {
   results.innerHTML = `${renderWarnings(data.warnings)}<section class="summary"><h2>UniProt has ${escapeHtml(data.record_count)} record${data.record_count === 1 ? '' : 's'} for ${escapeHtml(data.gene)} in ${escapeHtml(data.species)}.</h2><p>${escapeHtml(data.review_summary)}</p><p>${escapeHtml(data.review_explanation)}</p>${data.isoform_explanation ? `<p><strong>Isoforms:</strong> ${escapeHtml(data.isoform_explanation)}</p>` : ''}<p class="small">The cards below are comparisons, not rankings or recommendations.</p></section><div class="grid">${cards}</div>`;
 }
 
+function discoveryCard(item) {
+  return `<article class="card">
+    <h3>${escapeHtml(item.protein_name || item.gene || item.accession)}</h3>
+    <div class="meta">${escapeHtml(item.gene || 'No gene label')} · ${escapeHtml(item.organism || 'Unknown organism')} · ${escapeHtml(item.accession)}</div>
+    ${item.relationship ? `<p class="small"><strong>${escapeHtml(item.relationship)}</strong></p>` : ''}
+    <strong>Why this appeared</strong>
+    ${(item.why || []).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('')}
+  </article>`;
+}
+
 function renderDiscoveryCards(items) {
   if (!items.length) return `<div class="summary"><p>No traceable discovery result was found.</p></div>`;
-  return `<div class="grid">${items.map(item => `<article class="card"><h3>${escapeHtml(item.protein_name || item.gene || item.accession)}</h3><div class="meta">${escapeHtml(item.gene || 'No gene label')} · ${escapeHtml(item.organism || 'Unknown organism')} · ${escapeHtml(item.accession)}</div><strong>Why this appeared</strong>${(item.why || []).map(ctx => `<div class="evidence-box"><div class="small">${escapeHtml(ctx.source)}</div>${escapeHtml(ctx.text)}</div>`).join('')}</article>`).join('')}</div>`;
+
+  const groups = [
+    ['mentioned_organism', 'Proteins from the organism you mentioned'],
+    ['virus_host', 'Viral proteins linked to the mentioned host'],
+    ['global', 'Other traceable UniProt connections'],
+  ];
+
+  const sections = groups.map(([key, label]) => {
+    const rows = items.filter(item => (item.bucket || 'global') === key);
+    if (!rows.length) return '';
+    return `<section><h2>${escapeHtml(label)}</h2><div class="grid">${rows.map(discoveryCard).join('')}</div></section>`;
+  }).join('');
+
+  return sections || `<div class="grid">${items.map(discoveryCard).join('')}</div>`;
 }
 
 $('lookup-form').addEventListener('submit', (event) => {

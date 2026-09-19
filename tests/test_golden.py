@@ -224,3 +224,86 @@ def test_taxonomy_candidates_are_conservative_and_wordnet_free():
 # Additional guard: placeholder taxa are not auto-selected.
 def test_placeholder_taxonomy_record_is_detected():
     assert taxonomy_record_is_placeholder({"scientificName": "uncultured bacterium", "taxonId": 1}) is True
+
+# 22 — plural organism wording is preserved for later removal from the query.
+def test_species_resolution_preserves_plural_input_phrase():
+    from app.core.taxonomy import resolve_species
+
+    class TaxonomyClient:
+        def concurrent_taxonomy_search(self, terms, size=25):
+            human = {
+                "scientificName": "Homo sapiens",
+                "commonName": "Human",
+                "taxonId": 9606,
+                "rank": "species",
+            }
+            return {term: ([human] if term == "human" else []) for term in terms}, []
+
+        def uniprot_search(self, query, size=30):
+            return []
+
+    result = resolve_species("anthrax in humans", TaxonomyClient())
+    assert result["status"] == "resolved"
+    assert result["match"]["record"]["taxonId"] == 9606
+    assert result["match"]["input_phrase"] == "humans"
+
+
+# 23 — the parser restores the Colab behavior: organism out, concept intact.
+def test_natural_language_parser_extracts_anthrax_from_humans_query():
+    from app.core.query import extract_search_concepts
+
+    parsed = extract_search_concepts("anthrax in humans", "humans")
+    assert parsed["primary"] == "anthrax"
+    assert parsed["strict_variants"] == ["anthrax"]
+
+
+# 24 — main lookup does not trap concept discovery inside the mentioned species.
+def test_lookup_routes_anthrax_in_humans_to_global_discovery():
+    from app.core.service import ProteinService
+
+    anthrax_record = base_record(
+        accession="A0AANTH",
+        gene="pagA",
+        name="Anthrax toxin protective antigen",
+        entry_type="UniProtKB reviewed (Swiss-Prot)",
+    )
+    anthrax_record["organism"] = {
+        "scientificName": "Bacillus anthracis",
+        "commonName": None,
+        "taxonId": 1392,
+    }
+
+    class SmartClient:
+        def concurrent_taxonomy_search(self, terms, size=25):
+            human = {
+                "scientificName": "Homo sapiens",
+                "commonName": "Human",
+                "taxonId": 9606,
+                "rank": "species",
+            }
+            return {term: ([human] if term == "human" else []) for term in terms}, []
+
+        def concurrent_uniprot_search(self, queries, size=100):
+            rows = {}
+            for query in queries:
+                rows[query] = [anthrax_record] if query == "(anthrax)" else []
+            return rows, []
+
+        def uniprot_search(self, query, size=30):
+            return []
+
+    result = ProteinService(SmartClient()).lookup("anthrax in humans")
+    assert result["status"] == "no_direct_match"
+    assert result["query"] == "anthrax"
+    assert result["organism"]["taxon_id"] == 9606
+    assert result["discovery"][0]["accession"] == "A0AANTH"
+    assert result["discovery"][0]["bucket"] == "global"
+    assert "Anthrax" in result["discovery"][0]["why"][0]["text"]
+
+
+# 25 — discovery evidence may legitimately be a protein name, as in Colab v16.
+def test_discovery_can_be_explained_by_protein_name():
+    record = base_record(name="Anthrax toxin protective antigen")
+    contexts = annotation_match_contexts(record, "anthrax")
+    assert contexts
+    assert contexts[0]["source"] == "Protein name"

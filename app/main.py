@@ -13,7 +13,7 @@ from .core.service import ProteinService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-app = FastAPI(title="UniProt Beginner Explainer", version="0.15.0")
+app = FastAPI(title="UniProt Beginner Explainer", version="0.16.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -10,19 +10,19 @@
   <main class="shell">
     <header>
       <p class="eyebrow">UniProt beginner explainer</p>
-      <h1>Why does UniProt give me several records for this protein?</h1>
-      <p class="lede">Type a protein or gene. We show every matching UniProt record, what differs, and where each claim comes from. We do not pick a “best” record for you.</p>
+      <h1>Start with the biology you actually have.</h1>
+      <p class="lede">Type a protein, gene, organism-specific question, or biological concept. We first look for a direct UniProt identity match; if there is none, we show only traceable discovery connections and explain why each one appeared.</p>
     </header>
 
     <section class="search-panel">
       <form id="lookup-form">
-        <label for="query">Protein or gene</label>
+        <label for="query">Protein, gene, or biological question</label>
         <div class="search-row">
-          <input id="query" name="query" placeholder="Try: TP53 in human" autocomplete="off" />
-          <button type="submit">Explain the records</button>
+          <input id="query" name="query" placeholder="Try: TP53 in human, anthrax in humans, Li-Fraumeni syndrome" autocomplete="off" />
+          <button type="submit">Search UniProt</button>
         </div>
       </form>
-      <button id="show-discovery" class="secondary" type="button">Explore by biological concept instead</button>
+      <button id="show-discovery" class="secondary" type="button">Open discovery-only mode</button>
     </section>
 
     <section id="status" class="status" hidden></section>
@@ -30,8 +30,8 @@
     <section id="results" hidden></section>
 
     <section id="discovery-panel" class="discovery-panel" hidden>
-      <h2>Discovery mode</h2>
-      <p>This is separate from direct protein/gene identity matching. A result appears only when one UniProt-exposed annotation, linked database field, or linked literature title contains traceable evidence for your wording.</p>
+      <h2>Discovery-only mode</h2>
+      <p>This skips direct identity explanation and looks only for traceable UniProt connections. The main search box now does this automatically when it cannot find a direct protein/gene identity match.</p>
       <form id="discovery-form">
         <div class="search-row">
           <input id="discovery-query" placeholder="e.g. DNA repair" />

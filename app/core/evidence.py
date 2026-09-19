@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 from .records import get_all_gene_labels, get_all_protein_search_names
 from .text import meaningful_tokens, normalize_text
@@ -14,16 +14,40 @@ def literature_title_identifies_record(record: dict[str, Any], title: str) -> bo
     return any(normalize_text(name) in title_norm for name in names if normalize_text(name))
 
 
+def recursive_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from recursive_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from recursive_strings(child)
+
+
 def iter_discovery_strings(record: dict[str, Any]):
+    """Only expose fields that can explain why a broad UniProt search matched."""
+    # V16 behavior: names are legitimate discovery evidence. This is important
+    # for concepts such as "anthrax", where the explanatory text may be in a
+    # protein name rather than a FUNCTION/DISEASE comment.
+    for name in get_all_protein_search_names(record):
+        if name:
+            yield "Protein name", str(name)
+
+    for label in get_all_gene_labels(record):
+        if label:
+            yield "Gene name or synonym", str(label)
+
     for comment in record.get("comments", []) or []:
-        comment_type = str(comment.get("commentType") or "Comment")
-        for text in comment.get("texts", []) or []:
-            if isinstance(text, dict) and text.get("value"):
-                yield f"UniProt {comment_type} comment", str(text["value"])
+        comment_type = str(comment.get("commentType") or "ANNOTATION").replace("_", " ")
+        for value in recursive_strings(comment):
+            if value:
+                yield f"UniProt {comment_type} comment", str(value)
 
     for keyword in record.get("keywords", []) or []:
-        if isinstance(keyword, dict) and keyword.get("name"):
-            yield "UniProt keyword", str(keyword["name"])
+        value = keyword.get("name") if isinstance(keyword, dict) else keyword
+        if value:
+            yield "UniProt keyword", str(value)
 
     for feature in record.get("features", []) or []:
         description = feature.get("description")
@@ -75,6 +99,18 @@ def annotation_match_contexts(record: dict[str, Any], query: str, max_items: int
         if len(contexts) >= max_items:
             break
     return contexts
+
+
+def annotation_match_contexts_for_phrases(
+    record: dict[str, Any], phrases: list[str] | tuple[str, ...] | str, max_items: int = 3
+) -> tuple[list[dict[str, str]], str | None]:
+    if isinstance(phrases, str):
+        phrases = [phrases]
+    for phrase in phrases:
+        contexts = annotation_match_contexts(record, phrase, max_items=max_items)
+        if contexts:
+            return contexts, phrase
+    return [], None
 
 
 def evidence_label(evidence: dict[str, Any]) -> dict[str, Any]:
