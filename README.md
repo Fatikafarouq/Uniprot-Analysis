@@ -58,7 +58,7 @@ Run:
 PYTHONPATH=. pytest -q
 ```
 
-Current suite: 37 tests.
+Current suite: 38 tests.
 
 ## Deployment
 

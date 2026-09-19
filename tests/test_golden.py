@@ -555,3 +555,69 @@ def test_download_formats_cover_fasta_tsv_json_xml_and_text():
     from app.main import DOWNLOAD_FORMATS
 
     assert {"fasta", "tsv", "json", "xml", "txt"}.issubset(DOWNLOAD_FORMATS)
+
+# 38 — HTTP resilience: a transient 503 is retried, the successful response is cached,
+# and the same request does not hit the upstream service again.
+def test_http_client_retries_503_then_recovers_and_caches_success(tmp_path, monkeypatch):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from app.core.http import DataClient
+
+    monkeypatch.delenv("VERCEL", raising=False)
+
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self):
+            type(self).calls += 1
+
+            if type(self).calls == 1:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"temporary outage"}')
+                return
+
+            payload = json.dumps({"results": [{"primaryAccession": "PTEST"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format, *args):
+            # Keep the test output quiet.
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        client = DataClient(
+            cache_name=str(tmp_path / "retry_cache"),
+            cache_days=1,
+            timeout=3,
+        )
+
+        retry = client.session.get_adapter("http://").max_retries
+        assert retry.status == 2
+        assert retry.backoff_factor > 0
+        assert 503 in retry.status_forcelist
+
+        url = f"http://127.0.0.1:{server.server_port}/records"
+
+        first = client._get_json("test source", url)
+        assert first["results"][0]["primaryAccession"] == "PTEST"
+        assert Handler.calls == 2  # initial 503 + successful retry
+
+        second = client._get_json("test source", url)
+        assert second == first
+        assert Handler.calls == 2  # served from cache; no third upstream call
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
