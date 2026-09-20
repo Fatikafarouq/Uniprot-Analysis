@@ -26,6 +26,54 @@ function renderWarnings(warnings=[]) {
   return `<div class="status warning"><strong>Source note</strong><ul>${warnings.map(w => `<li>${escapeHtml(w.message)}</li>`).join('')}</ul></div>`;
 }
 
+
+function normalizeTextBlock(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function renderMechanismBlock(mechanism, compact=false) {
+  if (!mechanism) return '';
+  const sentences = (mechanism.summary || []).map(normalizeTextBlock).filter(Boolean);
+  if (!sentences.length) return '';
+  const sourceRows = (mechanism.sources || []).map(src => {
+    const field = escapeHtml(src.field || 'UniProt annotation');
+    const text = escapeHtml(normalizeTextBlock(src.text || ''));
+    return `<li><strong>${field}</strong><div>${text}</div></li>`;
+  }).join('');
+  return `<section class="biology-block mechanism-block">
+    <div class="biology-kicker">How this protein works</div>
+    <div class="mechanism-summary">${sentences.map((sentence, index) => `<p class="${index === 0 ? 'biology-lead' : 'mechanism-step'}">${escapeHtml(sentence)}</p>`).join('')}</div>
+    ${mechanism.evidence_note ? `<p class="evidence-note">${escapeHtml(mechanism.evidence_note)}</p>` : ''}
+    ${sourceRows && !compact ? `<details class="mechanism-provenance"><summary>How UniProt supports this explanation</summary><ul>${sourceRows}</ul></details>` : ''}
+  </section>`;
+}
+
+function renderDiseaseItems(diseases=[], limit=2) {
+  if (!diseases.length) return '';
+  const visible = diseases.slice(0, limit);
+  const hidden = diseases.slice(limit);
+  const item = d => `<li><strong>${escapeHtml(d.name || d.acronym || 'Disease annotation')}</strong>${d.acronym && d.name ? ` <span class="muted-inline">(${escapeHtml(d.acronym)})</span>` : ''}${d.description ? `<div>${escapeHtml(normalizeTextBlock(d.description))}</div>` : ''}${d.note ? `<div class="disease-note">${escapeHtml(normalizeTextBlock(d.note))}</div>` : ''}${d.evidence_summary ? `<div class="evidence-note">${escapeHtml(d.evidence_summary)}</div>` : ''}</li>`;
+  return `<section class="biology-block disease-block">
+    <div class="biology-kicker">Disease relevance</div>
+    <p class="small biology-source-note">UniProt exposes ${diseases.length} disease annotation${diseases.length === 1 ? '' : 's'} for this entry.</p>
+    <ul class="disease-list">${visible.map(item).join('')}</ul>
+    ${hidden.length ? `<details><summary>Show ${hidden.length} more disease annotation${hidden.length === 1 ? '' : 's'}</summary><ul class="disease-list">${hidden.map(item).join('')}</ul></details>` : ''}
+  </section>`;
+}
+
+function renderBiologicalOverview(overview) {
+  if (!overview) return '';
+  const hasMechanism = (overview.mechanism?.summary || []).length;
+  const hasDiseases = (overview.diseases || []).length;
+  if (!hasMechanism && !hasDiseases) return '';
+  const sourceLabel = overview.source_review?.label || 'UniProtKB';
+  return `<section class="biological-overview">
+    <div class="overview-heading"><div><p class="eyebrow">Biological explanation</p><h3>How ${escapeHtml(overview.protein_name || 'this protein')} works</h3></div><div class="source-pill">Source: ${escapeHtml(overview.source_accession || '')} · ${escapeHtml(sourceLabel)}</div></div>
+    ${renderMechanismBlock(overview.mechanism, false)}
+    ${renderDiseaseItems(overview.diseases || [], 2)}
+  </section>`;
+}
+
 async function post(url, body, signal=null) {
   const response = await fetch(url, {
     method: 'POST',
@@ -248,7 +296,7 @@ function recordMatchesFilter(item) {
 function recordCard(item) {
   const r = item.record || {};
   const review = r.review || {};
-  const evidence = r.function_evidence || {};
+  const mechanism = r.mechanism || {};
   const links = r.links || {};
   const isoforms = r.isoforms || [];
   const accession = item.accession;
@@ -266,9 +314,10 @@ function recordCard(item) {
       <label class="select-control"><input class="card-select" type="checkbox" aria-label="Select ${escapeHtml(accession)}" data-select-accession="${escapeHtml(accession)}" ${selectedAccessions.has(accession) ? 'checked' : ''}><span>Select</span></label>
     </div>
     <div class="meta">${escapeHtml(r.name)} · ${escapeHtml(item.length ?? 'unknown')} aa${r.gene ? ` · ${escapeHtml(r.gene)}` : ''}</div>
-    <div class="card-section"><div class="card-section-title">What differs</div>${explanation}</div>
-    <div class="evidence-box"><strong>Function evidence</strong><div>${escapeHtml(evidence.summary || 'Not available')}</div></div>
-    ${isoforms.length ? `<details><summary>Isoforms described in this entry (${isoforms.length})</summary><ul>${isoforms.map(i => `<li>${escapeHtml(i.ids?.join(', ') || i.name || 'Unnamed isoform')} — ${escapeHtml(i.sequence_status || 'status unavailable')}</li>`).join('')}</ul></details>` : ''}
+    ${renderMechanismBlock(mechanism)}
+    ${renderDiseaseItems(r.disease_evidence || [], 2)}
+    <div class="card-section"><div class="card-section-title">How this record differs from the others</div>${explanation}</div>
+    ${isoforms.length ? `<details><summary>Isoforms described in this entry (${isoforms.length})</summary><ul class="isoform-list">${isoforms.map(i => { const ids = Array.isArray(i.ids) ? i.ids.filter(Boolean).join(', ') : ''; const label = ids || i.name || 'Unnamed isoform'; const status = i.sequence_status || 'status unavailable'; return `<li><strong>${escapeHtml(label)}</strong>${i.name && ids && i.name !== ids ? ` · ${escapeHtml(i.name)}` : ''} <span class="muted-inline">— ${escapeHtml(status)}</span></li>`; }).join('')}</ul></details>` : ''}
     <details><summary>Database details</summary><div class="detail-grid"><div><span>Protein existence</span><strong>${escapeHtml(r.existence)}</strong></div><div><span>Ensembl transcript</span><strong>${escapeHtml(r.transcript || 'Not returned')}</strong></div></div></details>
     <div class="record-actions">
       ${links.uniprot ? `<a class="button-link secondary" href="${links.uniprot}" target="_blank" rel="noopener">UniProt</a>` : ''}
@@ -301,6 +350,7 @@ function renderReady(data) {
       <div class="summary-topline"><div><p class="eyebrow">Record explanation</p><h2>${escapeHtml(data.gene)} <span>in ${escapeHtml(data.species)}</span></h2></div><div class="record-count"><strong>${escapeHtml(data.record_count)}</strong><span>UniProtKB record${data.record_count === 1 ? '' : 's'}</span></div></div>
       <div class="review-strip"><span class="badge reviewed">${escapeHtml(data.reviewed_count ?? 0)} reviewed</span><span class="badge unreviewed">${escapeHtml(data.unreviewed_count ?? 0)} unreviewed</span></div>
       ${contextHtml}
+      ${renderBiologicalOverview(data.biological_overview)}
       ${differenceSummary}
       <div class="summary-actions">${allDownloads}</div>
       <div class="learn-row">

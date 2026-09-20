@@ -5,8 +5,9 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .evidence import function_evidence
+from .evidence import disease_evidence, function_evidence
 from .http import DataClient, SourceUnavailable
+from .mechanism import mechanism_explanation
 from .records import (
     analyse_features,
     existence_kind,
@@ -159,6 +160,8 @@ def build_comparison_records(records: list[dict[str, Any]], external: dict[str, 
                 "features": analyse_features(record),
                 "isoforms": extract_isoforms(record),
                 "function_evidence": function_evidence(record),
+                "disease_evidence": disease_evidence(record),
+                "mechanism": mechanism_explanation(record),
                 "links": external_links(record),
                 "raw_record": record,
             }
@@ -332,6 +335,32 @@ def build_difference_summary(records: list[dict[str, Any]]) -> list[str]:
 
     return notes[:4]
 
+def build_biological_overview(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Build a transparent beginner-facing biology overview from one source entry.
+
+    Prefer a reviewed Swiss-Prot record when one is available. Otherwise use
+    the first returned UniProtKB record. The source accession is always
+    returned so the UI never presents this as an unattributed synthesis.
+    """
+    if not records:
+        return None
+
+    source = next(
+        (item for item in records if item.get("review", {}).get("status") == "reviewed"),
+        records[0],
+    )
+
+    mechanism = source.get("mechanism") or {}
+
+    return {
+        "source_accession": source.get("accession"),
+        "source_review": source.get("review"),
+        "protein_name": source.get("name"),
+        "mechanism": mechanism,
+        "diseases": source.get("disease_evidence", []) or [],
+    }
+
+
 def explain_records(
     records: list[dict[str, Any]],
     gene: str,
@@ -373,6 +402,7 @@ def explain_records(
 
     has_isoforms = any(item.get("isoforms") for item in comparison)
     difference_summary = build_difference_summary(comparison)
+    biological_overview = build_biological_overview(comparison)
 
     return {
         "gene": gene,
@@ -387,6 +417,7 @@ def explain_records(
         ),
         "isoform_explanation": ISOFORM_EXPLANATION if has_isoforms else None,
         "difference_summary": difference_summary,
+        "biological_overview": biological_overview,
         "records": explained,
         "warnings": warnings,
         "external_annotations": external,

@@ -293,3 +293,60 @@ def function_evidence(record: dict[str, Any]) -> dict[str, Any]:
         summary = "No UniProt FUNCTION comment was exposed for this record."
 
     return {"summary": summary, "category_counts": category_counts, "statements": statements}
+
+
+def disease_evidence(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return UniProt DISEASE annotations without adding medical interpretation.
+
+    Each item preserves the disease name, UniProt disease accession, description,
+    any note exposed by UniProt, and the annotation evidence codes.
+    """
+    output: list[dict[str, Any]] = []
+
+    for comment in record.get("comments", []) or []:
+        if comment.get("commentType") != "DISEASE":
+            continue
+
+        disease = comment.get("disease") or {}
+        if not isinstance(disease, dict):
+            continue
+
+        name = disease.get("diseaseId")
+        description = disease.get("description")
+        accession = disease.get("diseaseAccession")
+        acronym = disease.get("acronym")
+        evidences = [evidence_label(item) for item in disease.get("evidences", []) or []]
+
+        note_parts: list[str] = []
+        note = comment.get("note") or {}
+        if isinstance(note, dict):
+            for text in note.get("texts", []) or []:
+                if isinstance(text, dict) and text.get("value"):
+                    note_parts.append(str(text["value"]))
+
+        if not any([name, description, accession, acronym, note_parts]):
+            continue
+
+        categories = {item.get("category") for item in evidences}
+        if "experimental" in categories:
+            evidence_summary = "This UniProt disease annotation includes experimental evidence."
+        elif "similarity" in categories:
+            evidence_summary = "This UniProt disease annotation includes similarity-based evidence."
+        elif "computational" in categories:
+            evidence_summary = "This UniProt disease annotation includes computational or sequence-model evidence."
+        elif evidences:
+            evidence_summary = "UniProt exposes evidence codes for this disease annotation."
+        else:
+            evidence_summary = "No disease-annotation evidence code was exposed in this record."
+
+        output.append({
+            "name": str(name) if name else None,
+            "accession": str(accession) if accession else None,
+            "acronym": str(acronym) if acronym else None,
+            "description": str(description) if description else None,
+            "note": " ".join(note_parts).strip() or None,
+            "evidence": evidences,
+            "evidence_summary": evidence_summary,
+        })
+
+    return output

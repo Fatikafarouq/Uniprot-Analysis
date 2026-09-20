@@ -88,3 +88,19 @@ The suite includes regression coverage for false evidence combination, literatur
 ## Deployment
 
 The repository can be deployed directly to Vercel as a FastAPI project. `app/main.py` is the FastAPI entry point and also serves the static frontend.
+
+## Beginner-facing biological explanation
+
+Record pages now surface the biology before the structural comparison:
+
+- the actual UniProt FUNCTION text is shown under **What this protein does**;
+- the ECO/evidence classification remains underneath as provenance/context rather than replacing the function itself;
+- UniProt DISEASE annotations are exposed as **Disease relevance**, including disease name, description, note, and evidence summary when present;
+- the record-to-record comparison follows afterward under **How this record differs from the others**;
+- the top of a record set includes a transparent biological overview sourced from a reviewed Swiss-Prot entry when one is available, with the source accession named explicitly.
+
+No disease relationship is inferred locally: the UI only displays disease annotations that UniProt exposes on that entry.
+
+## Mechanism-focused explanations
+
+Each UniProtKB entry now gets a conservative beginner-facing **How this protein works** explanation. The engine scans UniProt FUNCTION, ACTIVITY REGULATION, CATALYTIC ACTIVITY, SUBUNIT, SUBCELLULAR LOCATION, PATHWAY, COFACTOR, and functional-site annotations. It can rephrase and combine relationships that UniProt explicitly states, but it does not fill missing causal steps from general biological knowledge. Every synthesized explanation keeps an expandable provenance list showing the exact UniProt fields and wording that supported it.

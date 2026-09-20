@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from app.core.evidence import annotation_match_contexts, evidence_label, function_evidence
-from app.core.explain import ISOFORM_EXPLANATION, build_comparison_records, build_explanations
+from app.core.evidence import annotation_match_contexts, disease_evidence, evidence_label, function_evidence
+from app.core.explain import ISOFORM_EXPLANATION, build_biological_overview, build_comparison_records, build_explanations
 from app.core.records import (
     direct_match_details,
     external_links,
@@ -689,3 +689,155 @@ def test_frontend_keeps_comparison_summary_and_full_set_downloads_visible():
     assert "What differs across these records" in source
     assert "Download full record set" in source
     assert "What does reviewed vs unreviewed mean?" in source
+
+
+# 44
+def test_function_text_is_preserved_for_beginner_explanation():
+    record = base_record()
+    record["comments"] = [{"commentType": "FUNCTION", "texts": [{"value": "Insulin decreases blood glucose concentration."}]}]
+    profile = function_evidence(record)
+    assert profile["statements"][0]["text"] == "Insulin decreases blood glucose concentration."
+
+
+# 45
+def test_disease_annotations_are_extracted_without_inference():
+    record = base_record(gene="INS", name="Insulin")
+    record["comments"] = [{
+        "commentType": "DISEASE",
+        "disease": {
+            "diseaseId": "Type 1 diabetes mellitus 2",
+            "diseaseAccession": "DI-02788",
+            "acronym": "T1D2",
+            "description": "A multifactorial disorder of glucose homeostasis.",
+            "evidences": [{"evidenceCode": "ECO:0000269", "source": "PubMed", "id": "18192540"}],
+        },
+        "note": {"texts": [{"value": "The disease is caused by variants affecting the gene represented in this entry"}]},
+    }]
+    diseases = disease_evidence(record)
+    assert len(diseases) == 1
+    assert diseases[0]["name"] == "Type 1 diabetes mellitus 2"
+    assert diseases[0]["description"].startswith("A multifactorial disorder")
+    assert "experimental evidence" in diseases[0]["evidence_summary"].lower()
+
+
+# 46
+def test_comparison_records_include_function_and_disease_content():
+    record = base_record(gene="INS", name="Insulin")
+    record["comments"] = [
+        {"commentType": "FUNCTION", "texts": [{"value": "Insulin decreases blood glucose concentration."}]},
+        {"commentType": "DISEASE", "disease": {"diseaseId": "Hyperproinsulinemia", "description": "Elevated serum proinsulin-like material."}},
+    ]
+    external = {"ensembl_canonical": None, "gene_centric_accession": None, "appris": {}}
+    comparison = build_comparison_records([record], external)
+    assert comparison[0]["function_evidence"]["statements"][0]["text"].startswith("Insulin decreases")
+    assert comparison[0]["disease_evidence"][0]["name"] == "Hyperproinsulinemia"
+
+
+# 47
+def test_biological_overview_prefers_reviewed_record_and_names_source():
+    unreviewed = base_record("U1", gene="INS", name="Insulin", entry_type="UniProtKB unreviewed (TrEMBL)")
+    reviewed = base_record("P01308", gene="INS", name="Insulin", entry_type="UniProtKB reviewed (Swiss-Prot)")
+    reviewed["comments"] = [{"commentType": "FUNCTION", "texts": [{"value": "Insulin decreases blood glucose concentration."}]}]
+    external = {"ensembl_canonical": None, "gene_centric_accession": None, "appris": {}}
+    comparison = build_comparison_records([unreviewed, reviewed], external)
+    overview = build_biological_overview(comparison)
+    assert overview["source_accession"] == "P01308"
+    assert overview["mechanism"]["summary"][0].startswith("Insulin decreases")
+
+
+# 48
+def test_frontend_places_biology_before_record_differences():
+    from pathlib import Path
+    app_js = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text()
+    biology_pos = app_js.index('${renderMechanismBlock(mechanism)}')
+    difference_pos = app_js.index('How this record differs from the others')
+    assert biology_pos < difference_pos
+    assert 'Disease relevance' in app_js
+
+
+# 49 — mechanism synthesis can combine UniProt location + receptor FUNCTION wording
+# without adding a biological relationship that is absent from the source.
+def test_mechanism_combines_cell_membrane_and_receptor_role():
+    from app.core.mechanism import mechanism_explanation
+
+    record = base_record("P06213", gene="INSR", name="Insulin receptor")
+    record["comments"] = [
+        {
+            "commentType": "FUNCTION",
+            "texts": [{
+                "value": (
+                    "Receptor tyrosine kinase which mediates the pleiotropic actions of insulin. "
+                    "Binding of insulin leads to phosphorylation of intracellular substrates and activation of downstream signaling pathways."
+                )
+            }],
+        },
+        {
+            "commentType": "SUBCELLULAR LOCATION",
+            "subcellularLocations": [{"location": {"value": "Cell membrane"}}],
+        },
+    ]
+    profile = mechanism_explanation(record)
+    assert "cell membrane" in profile["summary"][0].lower()
+    assert "receptor tyrosine kinase" in profile["summary"][0].lower()
+    assert "insulin" in profile["summary"][0].lower()
+    assert profile["summary"][1].lower().startswith("when insulin binds")
+
+
+# 50 — every friendly mechanism sentence remains auditable to the exact UniProt fields used.
+def test_mechanism_keeps_exact_source_provenance():
+    from app.core.mechanism import mechanism_explanation
+
+    record = base_record("P06213", gene="INSR", name="Insulin receptor")
+    function_text = "Receptor for insulin."
+    record["comments"] = [
+        {"commentType": "FUNCTION", "texts": [{"value": function_text}]},
+        {"commentType": "SUBCELLULAR LOCATION", "subcellularLocations": [{"location": {"value": "Cell membrane"}}]},
+    ]
+    profile = mechanism_explanation(record)
+    sources = {(item["field"], item["text"]) for item in profile["sources"]}
+    assert ("FUNCTION", function_text) in sources
+    assert ("SUBCELLULAR LOCATION", "Cell membrane") in sources
+
+
+# 51 — enzymes can still receive a useful mechanism explanation even when UniProt
+# exposes the reaction in CATALYTIC ACTIVITY rather than a FUNCTION paragraph.
+def test_mechanism_uses_catalytic_activity_when_function_is_absent():
+    from app.core.mechanism import mechanism_explanation
+
+    record = base_record(name="Example enzyme")
+    record["comments"] = [{
+        "commentType": "CATALYTIC ACTIVITY",
+        "reaction": {"name": "ATP + H2O = ADP + phosphate"},
+    }]
+    profile = mechanism_explanation(record)
+    joined = " ".join(profile["summary"]).lower()
+    assert "catalyzes" in joined
+    assert "atp + h2o" in joined
+
+
+# 52 — DISEASE annotation alone must never be converted into a mechanistic claim.
+def test_mechanism_does_not_infer_function_from_disease_annotation():
+    from app.core.mechanism import mechanism_explanation
+
+    record = base_record()
+    record["comments"] = [{
+        "commentType": "DISEASE",
+        "disease": {"diseaseId": "Example disorder", "description": "Associated with variants in this gene."},
+    }]
+    profile = mechanism_explanation(record)
+    assert profile["limited"] is True
+    assert "limited mechanistic detail" in profile["summary"][0].lower()
+    assert "disorder" not in " ".join(profile["summary"]).lower()
+
+
+# 53 — the browser presents the mechanism before structural record-comparison facts
+# and keeps the exact UniProt provenance available to the user.
+def test_frontend_mechanism_precedes_record_differences_and_is_auditable():
+    from pathlib import Path
+
+    app_js = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text()
+    mechanism_pos = app_js.index('${renderMechanismBlock(mechanism)}')
+    difference_pos = app_js.index('How this record differs from the others')
+    assert mechanism_pos < difference_pos
+    assert "How this protein works" in app_js
+    assert "How UniProt supports this explanation" in app_js
